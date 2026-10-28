@@ -103,6 +103,8 @@ class DriveStorage:
         self.token_deadline = 0.0
         self.token_lock = threading.Lock()
         self.write_lock = threading.Lock()
+        self.registry_folders = None
+        self.registry_record_ids = {}
 
     def start(self):
         # A missing configuration leaves the home page usable, with uploads disabled.
@@ -176,11 +178,12 @@ class DriveStorage:
                                                    for row in permissions.get("permissions", [])):
             raise StorageError("Usa una carpeta de Drive restringida a personas concretas; solo se publicará cada PDF final.")
 
-    def _list(self, parent: str | None, extra: str) -> list[dict]:
+    def _list(self, parent: str | None, extra: str, *, include_trashed=False) -> list[dict]:
         location = f"'{parent}' in parents and " if parent else ""
+        active = '' if include_trashed else 'trashed = false and '
         params = {
-            "q": f"{location}trashed = false and ({extra})",
-            "fields": "files(id,name,mimeType,appProperties,properties,sha256Checksum,size),nextPageToken,incompleteSearch", "pageSize": 100,
+            "q": f"{location}{active}({extra})",
+            "fields": "files(id,name,mimeType,appProperties,properties,trashed,sha256Checksum,size),nextPageToken,incompleteSearch", "pageSize": 100,
             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
         rows, tokens = [], set()
         while True:
@@ -241,7 +244,7 @@ class DriveStorage:
                 + f"--{boundary}\r\nContent-Type: {mime}\r\n\r\n".encode()
                 + data + f"\r\n--{boundary}--\r\n".encode())
         result = self._json(self._request("POST", "/files", upload=True,
-            params={"uploadType": "multipart", "supportsAllDrives": "true", "fields": "id"},
+            params={"uploadType": "multipart", "supportsAllDrives": "true", "ignoreDefaultVisibility":"true", "fields": "id"},
             headers={"Content-Type": f"multipart/related; boundary={boundary}"}, content=body))
         return self._id(result.get("id"))
 
@@ -251,33 +254,35 @@ class DriveStorage:
         with self.write_lock:
             existing = self._list(self.folder_id, "mimeType = 'application/vnd.google-apps.folder' and "
                                  f"appProperties has {{ key='qcp_certificate_id' and value='{identifier}' }}")
-            if existing or self._record_pdf(identifier) or self._portable_records(identifier):
+            if existing or self._registry_record(identifier) or self._record_pdf(identifier) or self._portable_records(identifier):
                 raise StorageError("El certificado ya existe; se conservó el registro anterior.", 409)
             if metadata.get("id") != identifier:
                 raise StorageError("El registro no corresponde a la emisión solicitada.", 422)
             info = {**metadata, "storageBackend": "drive", "driveFileId": file_id,
                     "driveUrl": f"https://drive.google.com/file/d/{file_id}/view"}
             if publication.public_key:
-                info.update(qrMode=MODE, qrPublicKey=publication.public_key, issuedDriveFileId=file_id)
+                info.update(qrMode=MODE, qrPublicKey=publication.public_key, issuedDriveFileId=file_id,
+                            pdfMd5=hashlib.md5(pdf, usedforsecurity=False).hexdigest())
             try:
                 properties = encode_record(info)
                 public_properties = signed_record(info, publication.signing_key) if publication.public_key else None
             except ValueError as error:
                 raise StorageError(str(error), 422) from None
             created = False
+            record_id = None
             try:
                 file_metadata = {"id": file_id, "name": metadata["filename"], "mimeType": "application/pdf",
                                  "parents": [self.folder_id], "appProperties": properties}
-                if public_properties:
-                    file_metadata["properties"] = public_properties
                 actual_id = self._upload(file_metadata, pdf, "application/pdf")
                 if actual_id != file_id:
                     raise StorageError("Google Drive no conservó el enlace reservado del certificado.")
                 created = True
-                # Private properties remain private; the signed public record
-                # travels with the published PDF and its native Drive copies.
+                # Publish the PDF only. The signed registry is kept separately
+                # in an account-private folder, never in the output folder.
                 self._request("POST", f"/files/{file_id}/permissions", params={"supportsAllDrives": "true"},
                               json={"type": "anyone", "role": "reader", "allowFileDiscovery": False})
+                if public_properties:
+                    record_id = self._create_registry_record(identifier, public_properties, file_id)
                 metadata.update(info)
             except Exception:
                 if created:
@@ -285,13 +290,170 @@ class DriveStorage:
                         self._request("DELETE", f"/files/{file_id}", params={"supportsAllDrives": "true"})
                     except StorageError:
                         logger.warning("No se pudo limpiar el PDF de una publicación incompleta en Drive.")
+                if record_id:
+                    try:
+                        self._request("DELETE", f"/files/{record_id}", params={"supportsAllDrives": "true"})
+                    except StorageError:
+                        logger.warning("No se pudo limpiar un registro nuevo de una publicación incompleta.")
                 raise
 
+    def _registry_folders(self, create=False) -> list[str]:
+        if self.registry_folders:
+            return self.registry_folders
+        rows = self._list(None, "'me' in owners and mimeType = 'application/vnd.google-apps.folder' and "
+                          "properties has { key='qcp_portable_registry' and value='2' }")
+        folders = sorted(row['id'] for row in rows)
+        if not folders and create:
+            result = self._json(self._request('POST','/files',params={
+                'fields':'id','supportsAllDrives':'true','ignoreDefaultVisibility':'true'},json={
+                'name':'QCP - Registros del portal (no eliminar)',
+                'mimeType':'application/vnd.google-apps.folder','parents':['root'],
+                'properties':{'qcp_portable_registry':'2'}}))
+            folders = [self._id(result.get('id'))]
+        for folder in folders:
+            permissions = self._json(self._request('GET',f'/files/{folder}/permissions',params={
+                'fields':'permissions(type),nextPageToken','supportsAllDrives':'true'}))
+            if permissions.get('nextPageToken') or any(p.get('type') in {'anyone','domain'}
+                                                       for p in permissions.get('permissions',[])):
+                raise StorageError('El registro técnico de QCP debe permanecer privado en Drive.')
+        if folders:
+            self.registry_folders = folders
+        return folders
+
+    def _registry_record(self, identifier: str):
+        cached=self.registry_record_ids.get(identifier)
+        if cached:
+            try:
+                response=self._request('GET',f'/files/{cached}',params={'alt':'media'})
+                if len(response.content)>64*1024:
+                    raise StorageError('El registro técnico supera el tamaño permitido.')
+                return cached,self._json(response)
+            except StorageError as error:
+                if error.status!=404:raise
+                self.registry_record_ids.pop(identifier,None)
+        found = []
+        for folder in self._registry_folders():
+            found.extend(self._list(folder,f"name = '{identifier}.json' and mimeType = 'application/json'"))
+        if len(found)>1:
+            raise StorageError('Hay registros técnicos duplicados para este certificado.')
+        if not found:
+            return None
+        record_id = self._id(found[0]['id'])
+        response = self._request('GET',f'/files/{record_id}',params={'alt':'media'})
+        if len(response.content)>64*1024:
+            raise StorageError('El registro técnico supera el tamaño permitido.')
+        envelope = self._json(response)
+        self._remember_record(identifier,record_id)
+        return record_id,envelope
+
+    def _remember_record(self, identifier, record_id):
+        if len(self.registry_record_ids)>=256:
+            self.registry_record_ids.pop(next(iter(self.registry_record_ids)))
+        self.registry_record_ids[identifier]=record_id
+
+    def _create_registry_record(self, identifier: str, signed: dict, file_id: str) -> str:
+        folder = self._registry_folders(create=True)[0]
+        envelope = {'signedRecord':signed,'currentFileId':file_id}
+        record_id=self._upload({'name':f'{identifier}.json','mimeType':'application/json','parents':[folder]},
+                               json.dumps(envelope,ensure_ascii=False).encode(),'application/json')
+        self._remember_record(identifier,record_id)
+        return record_id
+
+    def _checked_file(self, file_id: str, info: dict):
+        try:
+            row = self._json(self._request('GET',f'/files/{self._id(file_id)}',params={
+                'fields':'id,mimeType,ownedByMe,trashed,sha256Checksum,md5Checksum','supportsAllDrives':'true'}))
+        except StorageError as error:
+            if error.status==404:
+                return None
+            raise
+        if row.get('trashed') or not row.get('ownedByMe') or row.get('mimeType')!='application/pdf':
+            return None
+        if row.get('sha256Checksum') and row['sha256Checksum']!=info['sha256']:
+            return None
+        selected = {**info,'driveFileId':file_id,'driveUrl':f'https://drive.google.com/file/d/{file_id}/view'}
+        if not row.get('sha256Checksum'):
+            try:
+                self.download(selected)
+            except StorageError as error:
+                if error.status in {404,409}:
+                    return None
+                raise
+        return selected
+
+    def _identical_copy(self, info: dict):
+        # Drive native copies can drop ALL custom properties. Search only binary
+        # checksums, reading file metadata rather than downloading unrelated PDFs.
+        params = {'q':"trashed = false and 'me' in owners and mimeType = 'application/pdf'",
+                  'fields':'files(id,sha256Checksum,md5Checksum),nextPageToken,incompleteSearch',
+                  'pageSize':1000,'supportsAllDrives':'true','includeItemsFromAllDrives':'true'}
+        tokens = set()
+        while True:
+            result = self._json(self._request('GET','/files',params=params))
+            if result.get('incompleteSearch'):
+                raise StorageError('Drive no pudo completar la búsqueda de una copia. Inténtalo nuevamente.')
+            rows = result.get('files',[])
+            if not isinstance(rows,list):
+                raise StorageError('Drive devolvió una búsqueda de copias no válida.')
+            for row in rows:
+                if not isinstance(row,dict):
+                    raise StorageError('Drive devolvió una búsqueda de copias no válida.')
+                sha = row.get('sha256Checksum')
+                md5_match = info.get('pdfMd5') and row.get('md5Checksum')==info['pdfMd5']
+                if sha==info['sha256'] or (not sha and md5_match):
+                    selected = self._checked_file(self._id(row.get('id')),info)
+                    if selected:
+                        return selected
+            token = result.get('nextPageToken')
+            if not token:
+                return None
+            if not isinstance(token,str) or token in tokens or len(tokens)>1000:
+                raise StorageError('Drive no pudo completar la búsqueda de copias de este certificado.')
+            tokens.add(token);params['pageToken']=token
+
+    def _registered_portable(self, identifier: str, public_key: str | None):
+        stored = self._registry_record(identifier)
+        if not stored:
+            return None
+        record_id,envelope = stored
+        try:
+            info = verified_record(envelope.get('signedRecord'),identifier,public_key)
+            self._validate_metadata(info,identifier)
+        except ValueError as error:
+            raise StorageError(str(error),404)from None
+        hinted = envelope.get('currentFileId')
+        if isinstance(hinted,str) and FILE_ID.fullmatch(hinted):
+            selected = self._checked_file(hinted,info)
+            if selected:
+                return selected
+        selected = self._identical_copy(info)
+        if not selected:
+            if isinstance(hinted,str) and FILE_ID.fullmatch(hinted):
+                try:
+                    row=self._json(self._request('GET',f'/files/{hinted}',params={'fields':'id,trashed'}))
+                    if row.get('trashed'):
+                        raise StorageError('No se encontró el PDF ni una copia íntegra en Drive.',404)
+                except StorageError as error:
+                    if error.status==404:
+                        raise StorageError('No se encontró el PDF ni una copia íntegra en Drive.',404)from None
+                    raise
+            raise StorageError('El PDF almacenado no coincide con el registro y no se encontró una copia íntegra.',409)
+        # This advisory pointer only updates our private technical record. The
+        # signed record, PDF bytes, QR, permissions and other certificates stay intact.
+        try:
+            self._request('PATCH',f'/files/{record_id}',upload=True,params={
+                'uploadType':'media','supportsAllDrives':'true'},
+                headers={'Content-Type':'application/json'},
+                content=json.dumps({**envelope,'currentFileId':selected['driveFileId']},ensure_ascii=False).encode())
+        except StorageError:
+            logger.warning('No se pudo actualizar el localizador privado; se conservó el PDF verificado.')
+        return selected
+
     def _portable_records(self, identifier: str, public_key: str | None = None) -> list[tuple[dict, dict]]:
-        # Public properties survive native Drive copies made by other clients.
-        # Restrict discovery to this account's files, never adopt a shared forgery.
+        # Compatibility reader for the first portable format. Its signed record
+        # may still be recoverable on the original in trash, even if copies lost it.
         rows = self._list(None, "'me' in owners and mimeType = 'application/pdf' and "
-                          f"properties has {{ key='qcp_certificate_id' and value='{identifier}' }}")
+                          f"properties has {{ key='qcp_certificate_id' and value='{identifier}' }}",include_trashed=True)
         candidates = []
         for row in rows:
             try:
@@ -306,6 +468,9 @@ class DriveStorage:
         identifier = str(UUID(certificate_id))
         if public_key is not None and not KEY.fullmatch(public_key):
             raise StorageError("El enlace de consulta del certificado no es válido.", 404)
+        registered = self._registered_portable(identifier,public_key)
+        if registered:
+            return registered
         candidates = self._portable_records(identifier, public_key)
         # Prefer the issued file while it is intact. Identical copies are valid
         # alternatives; names, folders and copied private properties are irrelevant.
@@ -323,6 +488,21 @@ class DriveStorage:
                     if error.status in {404, 409}:
                         continue
                     raise
+            # Compatibility for the briefly deployed property-based format:
+            # preserve its already signed record before any later copy loses it.
+            try:
+                with self.write_lock:
+                    if not self._registry_record(identifier):
+                        self._create_registry_record(identifier,row['properties'],row['id'])
+            except StorageError:
+                logger.warning('No se pudo registrar el formato portable anterior; se conserva el PDF verificado.')
+                if row.get('trashed'):
+                    raise
+            else:
+                registered=self._registered_portable(identifier,public_key)
+                if registered:return registered
+                if row.get('trashed'):
+                    raise StorageError('El registro se está actualizando. Intenta nuevamente.',503)
             return selected
         if candidates:
             raise StorageError("El PDF almacenado no coincide con el registro y no se encontró una copia íntegra para este QR.", 409)
@@ -331,6 +511,9 @@ class DriveStorage:
     def metadata(self, certificate_id: str, public_key: str | None = None) -> dict:
         if public_key is not None:
             return self.portable_metadata(certificate_id, public_key)
+        registered = self._registered_portable(str(UUID(certificate_id)),None)
+        if registered:
+            return registered
         record = self._record_pdf(certificate_id)
         if record:
             try:
@@ -379,8 +562,7 @@ class DriveStorage:
             copied_id = self._id(row.get("id"))
             if copied_id == source:
                 raise StorageError("Drive no creó un identificador nuevo para la prueba.")
-            copied = verified_record(row.get("properties", {}), info["id"], info["qrPublicKey"])
-            copied.update(driveFileId=copied_id, driveUrl=f"https://drive.google.com/file/d/{copied_id}/view")
+            copied = {**info,'driveFileId':copied_id,'driveUrl':f'https://drive.google.com/file/d/{copied_id}/view'}
             self.download(copied)  # Exact SHA-256, not filename matching.
             self._request("DELETE", f"/files/{source}", params={"supportsAllDrives": "true"})
             deleted = True
@@ -389,7 +571,8 @@ class DriveStorage:
                 raise StorageError("No se localizó la copia de prueba después de eliminar su origen.")
             self.download(resolved)
             return resolved, {"ok": True, "originalDeleted": True, "sameQr": True,
-                              "copiedFileId": copied_id, "privatePropertiesRemoved": not bool(row.get("appProperties"))}
+                              "copiedFileId": copied_id, "privatePropertiesRemoved": not bool(row.get("appProperties")),
+                              "customPropertiesRemoved":not bool(row.get('appProperties')or row.get('properties'))}
         except (StorageError, ValueError) as error:
             return info, {"ok": False, "originalDeleted": deleted, "detail": str(error)}
 

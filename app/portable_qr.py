@@ -1,8 +1,8 @@
 """Self-contained signed publication records for folder-independent QR lookup.
 
 The public key is pinned in the printed QR. The ephemeral private key is used
-once and never stored in Drive, the PDF or the response. Native Drive copies
-carry public file properties; a signature and the PDF hash prevent substitution.
+once and never stored in Drive, the PDF or the response. A private registry
+retains the signed record independently of PDF copies and their metadata.
 """
 
 import base64

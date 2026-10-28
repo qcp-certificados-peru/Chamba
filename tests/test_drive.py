@@ -72,25 +72,25 @@ class FakeDrive:
             query = request.url.params["q"]
             self.queries.append(query)
             parent = re.search(r"'([^']+)' in parents", query)
-            identifier = re.search(r"value='([^']+)'", query)
+            properties = re.findall(r"(appProperties|properties) has \{ key='([^']+)' and value='([^']+)' \}", query)
             rows = [row for row in self.files.values()
-                    if not row.get("trashed") and (not parent or parent[1] in row.get("parents", []))]
+                    if ("trashed = false" not in query or not row.get("trashed"))
+                    and (not parent or parent[1] in row.get("parents", []))]
             for mime in ("application/pdf", "application/vnd.google-apps.folder", "application/json"):
                 if f"mimeType = '{mime}'" in query:
                     rows = [row for row in rows if row.get("mimeType") == mime]
             if "'me' in owners" in query:
                 rows = [row for row in rows if row.get("ownedByMe", True)]
-            if identifier:
-                scope = "properties" if " properties has " in query else "appProperties"
-                rows = [row for row in rows if row.get(scope, {}).get("qcp_certificate_id") == identifier[1]]
-            else:
-                assert "name = 'metadata.json'" in query
-                rows = [row for row in rows if row.get("name") == "metadata.json"]
+            for scope,key,value in properties:
+                rows=[row for row in rows if row.get(scope,{}).get(key)==value]
+            name=re.search(r"name = '([^']+)'",query)
+            if name:
+                rows=[row for row in rows if row.get('name')==name[1]]
             offset = int(request.url.params.get("pageToken", "0"))
             rows = [{**row, "sha256Checksum": hashlib.sha256(row["content"]).hexdigest()}
                     if row.get("mimeType") == "application/pdf" else row for row in rows]
             result = {"files": [
-                {key: value for key, value in row.items() if key in {"id", "name", "mimeType", "appProperties", "properties", "sha256Checksum"}}
+                {key: value for key, value in row.items() if key in {"id", "name", "mimeType", "appProperties", "properties", "trashed", "sha256Checksum"}}
                 for row in rows[offset:offset + 100]]}
             if len(rows) > offset + 100:
                 result["nextPageToken"] = str(offset + 100)
@@ -118,6 +118,11 @@ class FakeDrive:
             row["content"] = content_part.get_payload(decode=True)
             self.files[row["id"]] = row
             return httpx.Response(200, json={"id": row["id"]})
+        update=re.fullmatch(r'/upload/drive/v3/files/([^/]+)',path)
+        if update and request.method=='PATCH':
+            if update[1] not in self.files:return httpx.Response(404)
+            self.files[update[1]]['content']=request.content
+            return httpx.Response(200,json={'id':update[1]})
         copy = re.fullmatch(r"/drive/v3/files/([^/]+)/copy", path)
         if copy and request.method == "POST":
             if copy[1] not in self.files:
@@ -142,8 +147,8 @@ class FakeDrive:
             return httpx.Response(404)
         if permissions:
             if request.method == "GET":
-                assert file_id == ROOT
-                return httpx.Response(200, json={"permissions": self.root_permissions})
+                assert self.files[file_id]['mimeType']=='application/vnd.google-apps.folder'
+                return httpx.Response(200, json={"permissions": self.root_permissions if file_id==ROOT else [{'type':'user'}]})
             if self.fail_permission:
                 return httpx.Response(403)
             self.permissions.append((file_id, json.loads(request.content)))
@@ -157,7 +162,12 @@ class FakeDrive:
         row = self.files[file_id]
         if request.url.params.get("alt") == "media":
             return httpx.Response(200, content=row["content"])
-        return httpx.Response(200, json={key: value for key, value in row.items() if key != "content"})
+        result={key: value for key, value in row.items() if key != "content"}
+        result['ownedByMe']=row.get('ownedByMe',True)
+        if row.get('mimeType')=='application/pdf':
+            result['sha256Checksum']=hashlib.sha256(row['content']).hexdigest()
+            result['md5Checksum']=hashlib.md5(row['content'],usedforsecurity=False).hexdigest()
+        return httpx.Response(200, json=result)
 
 
 def test_drive_excel_survives_loss_of_local_storage_and_domain_change(tmp_path, monkeypatch):
@@ -201,7 +211,7 @@ def test_drive_excel_survives_loss_of_local_storage_and_domain_change(tmp_path, 
             assert info["verificationUrl"] in decoded
         assert not ephemeral.exists()
         # One named PDF in the configured folder; no new folder or JSON sidecar.
-        assert set(drive.files) == {ROOT, info["driveFileId"]}
+        assert {row['id']for row in drive.files.values()if ROOT in row.get('parents',[])} == {info['driveFileId']}
         assert drive.files[info["driveFileId"]]["parents"] == [ROOT]
         assert drive.permissions == [(info["driveFileId"], {"type": "anyone", "role": "reader", "allowFileDiscovery": False})]
         assert drive.token_requests == 1
