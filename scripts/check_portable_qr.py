@@ -35,6 +35,7 @@ def main():
         info = response.json()
         assert info["copyTest"]["ok"], info["copyTest"]
         assert info["copyTest"]["originalDeleted"] and info["copyTest"]["privatePropertiesRemoved"]
+        assert info['copyTest']['customPropertiesRemoved']
         assert info["driveFileId"] != info["issuedDriveFileId"]
         assert info["verificationUrl"].startswith(base + "/q/")
         pdf = client.get(info["verificationUrl"])

@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import hashlib
+import json
 from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
@@ -27,7 +28,7 @@ def test_same_printed_qr_works_after_copy_and_trash_or_delete_original(permanent
         pdf = client.get(info["downloadUrl"]).content
         copied_id = drive.new_id()
         copied = {**deepcopy(drive.files[original]), "id": copied_id,
-                  "parents": ["outside_configured_folder"], "name": "RENAMED-COPY.pdf", "appProperties": {}}
+                  "parents": ["outside_configured_folder"], "name": "RENAMED-COPY.pdf", "appProperties": {},'properties':{}}
         drive.files[copied_id] = copied
         if permanent:
             del drive.files[original]
@@ -44,7 +45,10 @@ def test_same_printed_qr_works_after_copy_and_trash_or_delete_original(permanent
         selected = restarted.get(f"/api/certificates/{info['id']}?key={info['qrPublicKey']}").json()
         assert selected["driveFileId"] == copied_id and selected["issuedDriveFileId"] == original
         assert selected["verificationUrl"] == info["verificationUrl"]
-    assert drive.files == before and drive.writes == writes  # Recovery is read-only.
+    assert all(drive.files[k]==v for k,v in before.items()if v.get('mimeType')!='application/json')
+    # Only the new private registry's location hint may be updated.
+    assert all(method=='PATCH'and drive.files[path.rsplit('/',1)[-1]]['mimeType']=='application/json'
+               for method,path in drive.writes[len(writes):])
 
 
 @pytest.mark.parametrize("damage", ["pdf", "record", "key", "foreign_owner"])
@@ -58,13 +62,18 @@ def test_a_changed_or_forged_copy_never_replaces_the_issued_pdf(damage):
         elif damage == "record":
             forged = {**info, "filename": "OTHER-CERTIFICATE.pdf"}
             props = encode_record(forged); props.pop("qcp_origin")
-            props["qcp_signature"] = row["properties"]["qcp_signature"]
-            row["properties"] = props
+            registry=next(r for r in drive.files.values()if r.get('name')==info['id']+'.json')
+            envelope=__import__('json').loads(registry['content'])
+            props["qcp_signature"] = envelope['signedRecord']["qcp_signature"]
+            envelope['signedRecord']=props;registry['content']=__import__('json').dumps(envelope).encode()
         elif damage == "key":
             other_public, other_private = new_key()
             forged = {**info, "qrPublicKey": other_public,
                       "verificationUrl": info["verificationUrl"].rsplit("/", 1)[0] + "/" + other_public}
-            row["properties"] = signed_record(forged, other_private)
+            registry=next(r for r in drive.files.values()if r.get('name')==info['id']+'.json')
+            envelope=__import__('json').loads(registry['content'])
+            envelope['signedRecord']=signed_record(forged,other_private)
+            registry['content']=__import__('json').dumps(envelope).encode()
         else:
             row["ownedByMe"] = False
         drive.files[copied_id] = row
@@ -96,12 +105,12 @@ def test_diagnostic_copies_only_its_fresh_fictitious_pdf_then_deletes_its_source
         assert response.status_code == 201, response.text
         info = response.json(); proof = info["copyTest"]
         assert proof == {"ok": True, "originalDeleted": True, "sameQr": True,
-                         "copiedFileId": info["driveFileId"], "privatePropertiesRemoved": True}
+                         "copiedFileId": info["driveFileId"], "privatePropertiesRemoved": True,'customPropertiesRemoved':True}
         assert info["issuedDriveFileId"] not in drive.files
         assert drive.files[info["driveFileId"]]["parents"] == ["root"]
         assert client.get(info["verificationUrl"]).status_code == 200
     assert all(drive.files[key] == value for key, value in before.items())
-    assert len(set(drive.files) - set(before)) == 1
+    assert len([r for k,r in drive.files.items()if k not in before and r.get('mimeType')=='application/pdf'])==1
     assert all(path.rsplit("/", 1)[-1] not in before for method, path in drive.writes if method == "DELETE")
 
 
@@ -188,3 +197,42 @@ def test_copy_is_used_if_original_disappears_during_qr_download():
         response=client.get(info['verificationUrl'])
         assert response.status_code==200 and response.content==expected
         assert original not in drive.files
+
+
+def test_first_portable_format_can_recover_its_record_from_trash():
+    drive=FakeDrive()
+    with TestClient(create_app(certificate_storage=drive.storage()))as client:
+        info=upload(client).json();original=info['driveFileId'];copy_id=drive.new_id()
+        registry=next(row for row in drive.files.values()if row.get('name')==info['id']+'.json')
+        signed=json.loads(registry['content'])['signedRecord']
+        drive.files[original]['properties']=signed
+        drive.files[copy_id]={**deepcopy(drive.files[original]),'id':copy_id,'appProperties':{},'properties':{}}
+        for fid in list(drive.files):
+            if drive.files[fid].get('mimeType')=='application/json' or drive.files[fid].get('properties',{}).get('qcp_portable_registry'):
+                del drive.files[fid]
+        drive.files[original]['trashed']=True
+    with TestClient(create_app(certificate_storage=drive.storage()))as restarted:
+        response=restarted.get(info['verificationUrl'])
+        assert response.status_code==200
+        assert hashlib.sha256(response.content).hexdigest()==info['sha256']
+
+
+def test_md5_is_only_a_locator_when_drive_omits_sha256():
+    class NoShaDrive(FakeDrive):
+        def handle(self,request):
+            response=super().handle(request)
+            if response.status_code!=200 or request.url.params.get('alt')=='media':return response
+            payload=response.json()
+            for row in payload.get('files',[payload]):
+                row.pop('sha256Checksum',None)
+                data=self.files.get(row.get('id'),{}).get('content')
+                if data is not None:
+                    row['md5Checksum']=hashlib.md5(data,usedforsecurity=False).hexdigest()
+            return httpx.Response(200,json=payload)
+    drive=NoShaDrive()
+    with TestClient(create_app(certificate_storage=drive.storage()))as client:
+        info=upload(client).json();original=drive.files.pop(info['driveFileId']);copy_id=drive.new_id()
+        drive.files[copy_id]={**original,'id':copy_id,'appProperties':{},'properties':{}}
+        response=client.get(info['verificationUrl'])
+        assert response.status_code==200
+        assert hashlib.sha256(response.content).hexdigest()==info['sha256']

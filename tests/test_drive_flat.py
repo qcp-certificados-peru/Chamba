@@ -47,7 +47,7 @@ def test_moving_and_renaming_new_pdf_survives_restart_and_preserves_legacy():
         info = response.json()
         pdf = client.get(info["downloadUrl"]).content
         added = set(drive.files) - set(before)
-        assert added == {info["driveFileId"]}
+        assert {key for key in added if ROOT in drive.files[key].get('parents',[])} == {info['driveFileId']}
         row = drive.files[info["driveFileId"]]
         assert row["parents"] == [ROOT] and row["name"] == info["filename"]
         assert decode_record(row["appProperties"]) == info
