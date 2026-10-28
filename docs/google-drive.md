@@ -2,7 +2,13 @@
 
 El QR del modo Drive apunta directamente al PDF final en Google Drive, no al disco de Render. La aplicación reserva el identificador de Drive antes de generar el PDF, coloca ese enlace en el QR y publica el archivo con ese mismo identificador. Cada emisión recibe un identificador distinto. No existe una fecha de caducidad programada para el QR: seguirá abriendo el archivo mientras este exista, conserve su permiso de lectura y Google mantenga disponible la cuenta y el servicio.
 
-El código se guarda en GitHub; Render ejecuta la aplicación; Drive guarda los certificados. El Excel original y la imagen de firma separada no se guardan en Drive. En cada subcarpeta de emisión quedan el PDF final y `metadata.json`, que incluye código, fecha y hash SHA-256. Solo el PDF recibe acceso «cualquiera con el enlace», sin permiso de edición. La carpeta y el registro no se publican; la aplicación rechaza carpetas con acceso general público o de dominio porque sus permisos se heredarían.
+El código se guarda en GitHub; Render ejecuta la aplicación; Drive guarda los certificados. El Excel original y la imagen de firma separada no se guardan en Drive. **Cada emisión nueva crea únicamente un PDF con su nombre, directamente en la carpeta configurada.** No crea una subcarpeta ni un archivo JSON. El registro completo (código, fecha, avisos y hash SHA-256) se guarda como propiedades privadas de la aplicación asociadas a ese mismo archivo; no modifica el contenido ni los bytes del PDF. Solo el PDF recibe acceso «cualquiera con el enlace», sin permiso de edición. La carpeta y las propiedades privadas no se publican; la aplicación rechaza carpetas con acceso general público o de dominio porque sus permisos se heredarían.
+
+Los certificados emitidos con la estructura anterior conservan sus carpetas y `metadata.json`. Esos JSON siguen sirviendo para la consulta y descarga desde el portal: **no deben borrarse**. El cambio no migra, modifica, mueve ni elimina archivos anteriores; solo cambia cómo se guardan las emisiones nuevas.
+
+El registro nuevo se comprime sin pérdidas y se distribuye dentro de los límites de Drive: hasta 30 propiedades privadas y 124 bytes por pareja clave/valor. Si un registro excepcional supera esa capacidad o está incompleto, se informa del problema sin truncar información ni publicar un certificado sin registro. Los datos técnicos siguen sujetos al límite de 64 KB del lector anterior.
+
+Las propiedades privadas se leen con el cliente OAuth que las creó. Renovar su token o secreto no cambia esa identidad; sustituir el cliente OAuth por otro puede impedir que el portal lea esos registros nuevos. El enlace público del QR sigue dependiendo únicamente del archivo y sus permisos.
 
 Render Free sigue pudiendo suspender el portal y perder sus archivos locales. Esto ya no afecta a los QR nuevos del modo Drive: la consulta mediante el QR va directamente a Google. La consulta con información adicional y la descarga desde el portal leen Drive, de modo que no necesitan registros locales. Debe mantenerse la autorización para que el portal pueda emitir y consultar registros. Revocar la autorización impide nuevas operaciones del portal, pero no elimina los PDFs existentes ni modifica sus enlaces públicos.
 
@@ -87,8 +93,15 @@ Si eliges `drive` y faltan variables, la página abre pero deshabilita las emisi
 1. Sube un Excel ficticio y descarga el PDF final. Comprueba el formato, la firma y que el QR aparezca en la ubicación de siempre.
 2. Pulsa **Abrir en Drive** o escanea el QR. Debe abrir una dirección `https://drive.google.com/file/d/.../view`, sin un dominio de Render.
 3. Abre ese mismo enlace en una ventana de incógnito, sin iniciar sesión. Debes poder consultar o descargar el PDF. Google decide cómo muestra la vista previa; comprueba también el PDF descargado.
-4. Mira la carpeta: debe haber una subcarpeta para la emisión con el PDF y `metadata.json`. Solo el PDF debe tener acceso mediante enlace.
+4. Mira la carpeta: debe aparecer directamente el PDF con su nombre, sin una nueva subcarpeta ni JSON. Solo el PDF debe tener acceso mediante enlace.
 5. Reinicia/despliega el servicio Render y vuelve a escanear el mismo QR. Después, comprueba también la consulta y la descarga desde el portal.
+6. Con un documento ficticio, usa **Organizar → Mover** en Drive para trasladar ese mismo PDF a otra carpeta de la misma cuenta. Conserva su permiso de lectura mediante enlace y comprueba el QR, la consulta y la descarga nuevamente. La búsqueda del registro nuevo utiliza su identificador de emisión, no su nombre ni su carpeta actual.
+
+### Mover y copiar son operaciones diferentes
+
+Para reorganizar certificados conservando su QR, usa **Mover** (o cortar y pegar dentro de Drive). El archivo mantiene su identificador y el enlace del QR. La cuenta autorizada del portal debe conservar acceso al archivo, y sus destinatarios deben conservar el permiso de lectura mediante enlace.
+
+**Hacer una copia**, copiar y pegar o descargar y volver a subir puede crear otro archivo con un identificador diferente. El QR impreso en esa copia sigue apuntando al PDF original; no se redirige automáticamente. Conserva el original si necesitas ese QR. Aunque Drive copie también las propiedades técnicas, el portal reconoce el identificador del archivo emitido y evita confundir la copia con el original. Mover solo el PDF de una emisión antigua también conserva el enlace; deja su carpeta y JSON anteriores intactos para la consulta del portal.
 
 En un entorno de desarrollo con las variables configuradas de forma segura:
 
@@ -107,4 +120,4 @@ Cambiar la carpeta o la autorización afecta a las **emisiones nuevas**. No migr
 
 Conserva copias de seguridad y no borres, reemplaces ni restrinjas los PDFs que deban seguir consultándose. Renombrar un PDF o moverlo dentro de la misma cuenta no cambia su identificador, pero hay que revisar los permisos heredados después de moverlo. Un QR no garantiza autenticidad ni permanencia por sí solo; su duración depende del archivo y del servicio al que apunta.
 
-Referencias oficiales: [OAuth para aplicaciones de servidor](https://developers.google.com/identity/protocols/oauth2/web-server), [caducidad de refresh tokens](https://developers.google.com/identity/protocols/oauth2#expiration), [crear archivos con IDs reservados](https://developers.google.com/workspace/drive/api/guides/create-file), [cuentas de servicio y cuota](https://developers.google.com/workspace/drive/api/guides/handle-errors#storageQuotaExceeded).
+Referencias oficiales: [OAuth para aplicaciones de servidor](https://developers.google.com/identity/protocols/oauth2/web-server), [caducidad de refresh tokens](https://developers.google.com/identity/protocols/oauth2#expiration), [crear archivos con IDs reservados](https://developers.google.com/workspace/drive/api/guides/create-file), [propiedades privadas y sus límites](https://developers.google.com/workspace/drive/api/guides/properties), [cuentas de servicio y cuota](https://developers.google.com/workspace/drive/api/guides/handle-errors#storageQuotaExceeded).
