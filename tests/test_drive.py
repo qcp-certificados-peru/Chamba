@@ -2,6 +2,7 @@
 
 from email.parser import BytesParser
 from email.policy import default
+from copy import deepcopy
 import hashlib
 from io import BytesIO
 import json
@@ -77,14 +78,20 @@ class FakeDrive:
             for mime in ("application/pdf", "application/vnd.google-apps.folder", "application/json"):
                 if f"mimeType = '{mime}'" in query:
                     rows = [row for row in rows if row.get("mimeType") == mime]
+            if "'me' in owners" in query:
+                rows = [row for row in rows if row.get("ownedByMe", True)]
             if identifier:
-                rows = [row for row in rows if row.get("appProperties", {}).get("qcp_certificate_id") == identifier[1]]
+                scope = "properties" if " properties has " in query else "appProperties"
+                rows = [row for row in rows if row.get(scope, {}).get("qcp_certificate_id") == identifier[1]]
             else:
                 assert "name = 'metadata.json'" in query
                 rows = [row for row in rows if row.get("name") == "metadata.json"]
             offset = int(request.url.params.get("pageToken", "0"))
+            for row in rows:
+                if row.get("mimeType") == "application/pdf":
+                    row["sha256Checksum"] = hashlib.sha256(row["content"]).hexdigest()
             result = {"files": [
-                {key: value for key, value in row.items() if key in {"id", "name", "mimeType", "appProperties"}}
+                {key: value for key, value in row.items() if key in {"id", "name", "mimeType", "appProperties", "properties", "sha256Checksum"}}
                 for row in rows[offset:offset + 100]]}
             if len(rows) > offset + 100:
                 result["nextPageToken"] = str(offset + 100)
@@ -105,12 +112,30 @@ class FakeDrive:
             row.setdefault("id", self.new_id())
             if row["id"] in self.files:
                 return httpx.Response(409, json={"error": "fileAlreadyExists"})
-            properties = row.get("appProperties", {})
-            assert len(properties) <= 30
-            assert all(len(key.encode()) + len(value.encode()) <= 124 for key, value in properties.items())
+            for scope in ("appProperties", "properties"):
+                properties = row.get(scope, {})
+                assert len(properties) <= 30
+                assert all(len(key.encode()) + len(value.encode()) <= 124 for key, value in properties.items())
             row["content"] = content_part.get_payload(decode=True)
             self.files[row["id"]] = row
             return httpx.Response(200, json={"id": row["id"]})
+        copy = re.fullmatch(r"/drive/v3/files/([^/]+)/copy", path)
+        if copy and request.method == "POST":
+            if copy[1] not in self.files:
+                return httpx.Response(404)
+            row = deepcopy(self.files[copy[1]])
+            updates = json.loads(request.content)
+            for scope in ("appProperties", "properties"):
+                for key, value in updates.pop(scope, {}).items():
+                    if value is None:
+                        row.get(scope, {}).pop(key, None)
+                    else:
+                        row.setdefault(scope, {})[key] = value
+            row.update(updates)
+            row["id"] = self.new_id()
+            row["sha256Checksum"] = hashlib.sha256(row["content"]).hexdigest()
+            self.files[row["id"]] = row
+            return httpx.Response(200, json={key: value for key, value in row.items() if key != "content"})
         match = re.fullmatch(r"/drive/v3/files/([^/]+)(/permissions)?", path)
         assert match, f"Unexpected Google request: {request.method} {path}"
         file_id, permissions = match.groups()
@@ -157,7 +182,8 @@ def test_drive_excel_survives_loss_of_local_storage_and_domain_change(tmp_path, 
         assert info["certificateType"] == "acreditado"
         assert info["backgroundVerified"] is True
         assert info["backgroundPages"] == [1, 2]
-        assert info["verificationUrl"] == f"https://drive.google.com/file/d/{info['driveFileId']}/view"
+        assert info["verificationUrl"] == f"https://old.example.com/q/{info['id']}/{info['qrPublicKey']}"
+        assert info["driveUrl"] == f"https://drive.google.com/file/d/{info['driveFileId']}/view"
         download = client.get(info["downloadUrl"])
         assert download.status_code == 200
         pdf = download.content

@@ -3,7 +3,8 @@
   const $ = (id) => document.getElementById(id);
   const id = window.location.pathname.split("/").filter(Boolean).pop();
   try {
-    const response = await fetch(`/api/certificates/${encodeURIComponent(id)}`);
+    const key = new URLSearchParams(window.location.search).get("key");
+    const response = await fetch(`/api/certificates/${encodeURIComponent(id)}${key ? `?key=${encodeURIComponent(key)}` : ""}`);
     if (!response.ok) throw new Error("No se encontró este certificado en el portal.");
     const info = await response.json();
     $("verify-name").textContent = info.filename;

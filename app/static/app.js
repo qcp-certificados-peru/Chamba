@@ -278,8 +278,17 @@ function addResult(file, result, error) {
     externalIcon.append(path);
     verify.append(externalIcon);
     actions.append(download, verify);
+    if (result.qrMode === "portable-v1") {
+      const qrLink = document.createElement("a");
+      qrLink.href = result.verificationUrl;
+      qrLink.target = "_blank";
+      qrLink.rel = "noopener";
+      qrLink.textContent = "Probar QR";
+      actions.append(qrLink);
+    }
     card.append(actions);
-    if (result.driveUrl) $("drive-file-help").hidden = false;
+    if (result.qrMode === "portable-v1") $("portable-file-help").hidden = false;
+    else if (result.driveUrl) $("drive-file-help").hidden = false;
   }
   $("result-list").append(card);
 }
@@ -305,6 +314,7 @@ $("certificate-form").addEventListener("submit", async (event) => {
   $("submit").textContent = "Preparando…";
   $("result-list").replaceChildren();
   $("drive-file-help").hidden = true;
+  $("portable-file-help").hidden = true;
   $("results").hidden = false;
   const failed = [];
   const batch = [...files];

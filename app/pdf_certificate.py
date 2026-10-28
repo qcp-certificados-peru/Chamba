@@ -33,7 +33,8 @@ def prepare_qr_slot(doc, guide, qr):
         for link in page.get_links():
             if area.intersects(pymupdf.Rect(link['from'])):
                 page.delete_link(link)
-    page=doc.reload_page(page)
+    # Drawing/annotation readers use the updated document. Reloading a one-page
+    # PDF can fail while MuPDF still holds another reference to the same page.
     # Text and images are checked by the shared Excel/PDF QR inserter. Also
     # protect vector table borders, annotations and unrelated links in PDFs.
     for drawing in page.get_drawings():

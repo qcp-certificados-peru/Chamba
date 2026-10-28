@@ -1,6 +1,6 @@
 """Local development storage and durable Google Drive publication."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 import httpx
 
 from app.drive_records import decode_record, encode_record, original_file
+from app.portable_qr import KEY, MODE, new_key, signed_record, verified_record
 
 logger = logging.getLogger(__name__)
 DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -33,6 +34,8 @@ class StorageError(Exception):
 class Publication:
     verification_url: str
     drive_file_id: str | None = None
+    public_key: str | None = None
+    signing_key: bytes | None = field(default=None, repr=False)
 
 
 class LocalStorage:
@@ -177,7 +180,7 @@ class DriveStorage:
         location = f"'{parent}' in parents and " if parent else ""
         params = {
             "q": f"{location}trashed = false and ({extra})",
-            "fields": "files(id,name,mimeType,appProperties),nextPageToken,incompleteSearch", "pageSize": 100,
+            "fields": "files(id,name,mimeType,appProperties,properties,sha256Checksum,size),nextPageToken,incompleteSearch", "pageSize": 100,
             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
         rows, tokens = [], set()
         while True:
@@ -228,7 +231,8 @@ class DriveStorage:
             file_id = self._id(result["ids"][0])
         except (KeyError, IndexError, TypeError):
             raise StorageError("No se pudo reservar el enlace del certificado en Google Drive.") from None
-        return Publication(f"https://drive.google.com/file/d/{file_id}/view", file_id)
+        public, private = new_key()
+        return Publication(f"{origin}/q/{certificate_id}/{public}", file_id, public, private)
 
     def _upload(self, metadata: dict, data: bytes, mime: str) -> str:
         boundary = "qcp_" + uuid4().hex
@@ -253,14 +257,20 @@ class DriveStorage:
                 raise StorageError("El registro no corresponde a la emisión solicitada.", 422)
             info = {**metadata, "storageBackend": "drive", "driveFileId": file_id,
                     "driveUrl": f"https://drive.google.com/file/d/{file_id}/view"}
+            if publication.public_key:
+                info.update(qrMode=MODE, qrPublicKey=publication.public_key, issuedDriveFileId=file_id)
             try:
                 properties = encode_record(info)
+                public_properties = signed_record(info, publication.signing_key) if publication.public_key else None
             except ValueError as error:
                 raise StorageError(str(error), 422) from None
             created = False
             try:
-                actual_id = self._upload({"id": file_id, "name": metadata["filename"], "mimeType": "application/pdf",
-                                         "parents": [self.folder_id], "appProperties": properties}, pdf, "application/pdf")
+                file_metadata = {"id": file_id, "name": metadata["filename"], "mimeType": "application/pdf",
+                                 "parents": [self.folder_id], "appProperties": properties}
+                if public_properties:
+                    file_metadata["properties"] = public_properties
+                actual_id = self._upload(file_metadata, pdf, "application/pdf")
                 if actual_id != file_id:
                     raise StorageError("Google Drive no conservó el enlace reservado del certificado.")
                 created = True
@@ -276,7 +286,46 @@ class DriveStorage:
                         logger.warning("No se pudo limpiar el PDF de una publicación incompleta en Drive.")
                 raise
 
-    def metadata(self, certificate_id: str) -> dict:
+    def portable_metadata(self, certificate_id: str, public_key: str | None = None) -> dict:
+        identifier = str(UUID(certificate_id))
+        if public_key is not None and not KEY.fullmatch(public_key):
+            raise StorageError("El enlace de consulta del certificado no es válido.", 404)
+        # Public properties survive native Drive copies made by other clients.
+        # Restrict discovery to this account's files, never adopt a shared forgery.
+        rows = self._list(None, "'me' in owners and mimeType = 'application/pdf' and "
+                          f"properties has {{ key='qcp_certificate_id' and value='{identifier}' }}")
+        candidates = []
+        for row in rows:
+            try:
+                info = verified_record(row.get("properties", {}), identifier, public_key)
+                self._validate_metadata(info, identifier)
+            except (ValueError, StorageError):
+                continue
+            candidates.append((row, info))
+        # Prefer the issued file while it is intact. Identical copies are valid
+        # alternatives; names, folders and copied private properties are irrelevant.
+        candidates.sort(key=lambda item: (item[0]["id"] != item[1].get("issuedDriveFileId"), item[0]["id"]))
+        for row, info in candidates:
+            checksum = row.get("sha256Checksum")
+            if checksum and checksum != info["sha256"]:
+                continue
+            selected = {**info, "driveFileId": row["id"],
+                        "driveUrl": f"https://drive.google.com/file/d/{row['id']}/view"}
+            if not checksum:
+                try:
+                    self.download(selected)
+                except StorageError as error:
+                    if error.status in {404, 409}:
+                        continue
+                    raise
+            return selected
+        if candidates:
+            raise StorageError("El PDF almacenado no coincide con el registro y no se encontró una copia íntegra para este QR.", 409)
+        raise StorageError("No se encontró el certificado ni una copia válida en esta cuenta de Drive.", 404)
+
+    def metadata(self, certificate_id: str, public_key: str | None = None) -> dict:
+        if public_key is not None:
+            return self.portable_metadata(certificate_id, public_key)
         record = self._record_pdf(certificate_id)
         if record:
             try:
@@ -286,6 +335,11 @@ class DriveStorage:
             if info.get("driveFileId") != record["id"]:
                 raise StorageError("El registro no corresponde al PDF emitido.")
             return self._validate_metadata(info, certificate_id)
+        try:
+            return self.portable_metadata(certificate_id)
+        except StorageError as error:
+            if error.status != 404:
+                raise
         # Read legacy folders/JSON exactly as issued. Never migrate or edit them.
         folder = self._record_folder(certificate_id)
         records = self._list(folder, "name = 'metadata.json' and mimeType = 'application/json'")
@@ -302,6 +356,37 @@ class DriveStorage:
                 or not isinstance(info.get("filename"), str) or not re.fullmatch(r"[a-f0-9]{64}", str(info.get("sha256", "")))):
             raise StorageError("El registro del certificado no es válido.")
         return info
+
+    def exercise_fresh_test_copy(self, info: dict) -> tuple[dict, dict]:
+        """Only called for a freshly issued, byte-checked SIN VALIDEZ fixture.
+
+        No caller-supplied Drive IDs or existing certificates enter this path.
+        Clear private properties on the copy, leave public properties to native
+        Drive inheritance, and verify its bytes BEFORE removing our new source.
+        """
+        source = self._id(info["driveFileId"])
+        deleted = False
+        try:
+            row = self._json(self._request("POST", f"/files/{source}/copy", params={
+                "supportsAllDrives": "true", "fields": "id,mimeType,properties,appProperties,sha256Checksum,parents"},
+                json={"name": "PRUEBA-COPIA-QR-PORTABLE-SIN-VALIDEZ.pdf", "parents": ["root"],
+                      "appProperties": {key: None for key in encode_record(info)}}))
+            copied_id = self._id(row.get("id"))
+            if copied_id == source:
+                raise StorageError("Drive no creó un identificador nuevo para la prueba.")
+            copied = verified_record(row.get("properties", {}), info["id"], info["qrPublicKey"])
+            copied.update(driveFileId=copied_id, driveUrl=f"https://drive.google.com/file/d/{copied_id}/view")
+            self.download(copied)  # Exact SHA-256, not filename matching.
+            self._request("DELETE", f"/files/{source}", params={"supportsAllDrives": "true"})
+            deleted = True
+            resolved = self.portable_metadata(info["id"], info["qrPublicKey"])
+            if resolved["driveFileId"] != copied_id:
+                raise StorageError("No se localizó la copia de prueba después de eliminar su origen.")
+            self.download(resolved)
+            return resolved, {"ok": True, "originalDeleted": True, "sameQr": True,
+                              "copiedFileId": copied_id, "privatePropertiesRemoved": not bool(row.get("appProperties"))}
+        except (StorageError, ValueError) as error:
+            return info, {"ok": False, "originalDeleted": deleted, "detail": str(error)}
 
     def download(self, metadata: dict) -> bytes:
         file_id = self._id(metadata.get("driveFileId"))
