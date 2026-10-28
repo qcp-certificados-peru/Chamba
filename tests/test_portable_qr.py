@@ -156,6 +156,7 @@ def test_a_changed_or_forged_copy_never_replaces_the_issued_pdf(damage):
         response = client.get(info["verificationUrl"])
         assert response.status_code in {404, 409}
         assert response.headers["content-type"].startswith("application/json")
+        assert response.headers["cache-control"] == "no-store"
         assert len(drive.permissions) == 1  # Only the issued original was shared.
 
 

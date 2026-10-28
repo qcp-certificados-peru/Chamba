@@ -164,7 +164,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
             "default-src 'self'; img-src 'self' data: blob:; script-src 'self'; "
             "style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         )
-        if request.url.path.startswith("/api/"):
+        if request.url.path.startswith(("/api/", "/q/")):
             response.headers["Cache-Control"] = "no-store"
         elif request.url.path.startswith("/static/") or response.headers.get("content-type", "").startswith("text/html"):
             response.headers.setdefault("Cache-Control", "no-cache")
