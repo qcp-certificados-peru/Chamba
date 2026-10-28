@@ -76,7 +76,7 @@ def test_moving_only_an_older_pdf_keeps_legacy_json_and_lookup_untouched():
     assert drive.files == before and drive.writes == []
 
 
-def test_a_drive_copy_cannot_take_over_the_original_record():
+def test_signed_drive_copy_serves_same_pdf_after_original_is_deleted():
     drive = FakeDrive()
     with TestClient(create_app(certificate_storage=drive.storage())) as client:
         info = upload(client).json()
@@ -84,9 +84,11 @@ def test_a_drive_copy_cannot_take_over_the_original_record():
         copied_id = drive.new_id()
         drive.files[copied_id] = {**deepcopy(drive.files[original_id]), "id": copied_id}
         assert client.get(f"/api/certificates/{info['id']}").json() == info
-        # The copy's QR still refers to the original; never substitute its ID.
+        # The new QR pins the publication key; an identical signed copy works.
         del drive.files[original_id]
-        assert client.get(f"/api/certificates/{info['id']}").status_code == 404
+        selected = client.get(f"/api/certificates/{info['id']}").json()
+        assert selected['driveFileId'] == copied_id and selected['issuedDriveFileId'] == original_id
+        assert client.get(info['verificationUrl']).content == drive.files[copied_id]['content']
 
 
 def test_original_record_is_found_after_more_than_one_page_of_copies():

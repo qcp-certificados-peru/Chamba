@@ -346,7 +346,10 @@ def _insert_template_stamp(page: pymupdf.Page, guide: pymupdf.Rect, qr: bytes,
     occupied = [pymupdf.Rect(span["bbox"]) for block in page.get_text("dict", flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES)["blocks"]
                 for line in block.get("lines", []) for span in line["spans"]]
     # The full-page letterhead is expected beneath the certificate content.
-    occupied.extend(pymupdf.Rect(info["bbox"]) for info in page.get_image_info(hashes=True)
+    # Read current paints after a previous QR/background was cleared; cached
+    # get_image_info may still describe the old image on a single-page PDF.
+    current_images = page.get_textpage(flags=pymupdf.TEXT_PRESERVE_IMAGES).extractIMGINFO(hashes=True)
+    occupied.extend(pymupdf.Rect(info["bbox"]) for info in current_images
                     if not (info["digest"] in background_digests
                             and pymupdf.Rect(info["bbox"]).get_area() >= page.rect.get_area() * 0.9))
     for area in areas:

@@ -1,16 +1,16 @@
 # Guardar certificados en Google Drive desde Render Free
 
-El QR del modo Drive apunta directamente al PDF final en Google Drive, no al disco de Render. La aplicación reserva el identificador de Drive antes de generar el PDF, coloca ese enlace en el QR y publica el archivo con ese mismo identificador. Cada emisión recibe un identificador distinto. No existe una fecha de caducidad programada para el QR: seguirá abriendo el archivo mientras este exista, conserve su permiso de lectura y Google mantenga disponible la cuenta y el servicio.
+Las emisiones nuevas usan un **QR portable del portal QCP**. El enlace identifica la emisión y una clave pública, y busca el PDF original o una copia íntegra en la misma cuenta de Drive. Por eso se puede copiar el PDF a otra carpeta de esa cuenta y eliminar el original, siempre que se conserve una copia nativa de Drive sin modificar.
 
-El código se guarda en GitHub; Render ejecuta la aplicación; Drive guarda los certificados. El Excel original y la imagen de firma separada no se guardan en Drive. **Cada emisión nueva crea únicamente un PDF con su nombre, directamente en la carpeta configurada.** No crea una subcarpeta ni un archivo JSON. El registro completo (código, fecha, avisos y hash SHA-256) se guarda como propiedades privadas de la aplicación asociadas a ese mismo archivo; no modifica el contenido ni los bytes del PDF. Solo el PDF recibe acceso «cualquiera con el enlace», sin permiso de edición. La carpeta y las propiedades privadas no se publican; la aplicación rechaza carpetas con acceso general público o de dominio porque sus permisos se heredarían.
+El código se guarda en GitHub; Render ejecuta el portal; Drive guarda los PDF. Cada emisión sigue creando **un PDF suelto con su nombre**, sin subcarpetas ni JSON. El registro completo se comprime en propiedades del archivo. La versión portable añade un registro público firmado con Ed25519 que se conserva en las copias nativas de Drive. Incluye los datos de consulta ya disponibles para quien tenga el QR; nunca contiene credenciales ni la clave privada de firma. La clave privada se genera por emisión, se usa una vez y no se almacena. El QR fija la clave pública para comprobar el registro y el SHA-256 del PDF impide reemplazarlo por un documento diferente. Esta comprobación técnica no certifica la identidad del emisor ni sustituye una firma digital del certificado.
 
-Los certificados emitidos con la estructura anterior conservan sus carpetas y `metadata.json`. Esos JSON siguen sirviendo para la consulta y descarga desde el portal: **no deben borrarse**. El cambio no migra, modifica, mueve ni elimina archivos anteriores; solo cambia cómo se guardan las emisiones nuevas.
+El portal prefiere el original íntegro y, si se elimina o se envía a la papelera, utiliza una copia válida que sea propiedad de la cuenta conectada. La resolución solo lee datos: no restaura, mueve, elimina ni cambia permisos de los archivos. El PDF se entrega mediante el portal después de comprobar su hash, incluso si la copia tiene permisos privados. Quien posea el QR puede seguir descargando ese certificado publicado; poner una copia en una carpeta privada no retira por sí solo su consulta pública.
 
-El registro nuevo se comprime sin pérdidas y se distribuye dentro de los límites de Drive: hasta 30 propiedades privadas y 124 bytes por pareja clave/valor. Si un registro excepcional supera esa capacidad o está incompleto, se informa del problema sin truncar información ni publicar un certificado sin registro. Los datos técnicos siguen sujetos al límite de 64 KB del lector anterior.
+**Los QR anteriores que abren directamente Google Drive no cambian.** Sus carpetas, JSON y propiedades privadas se conservan sin migración ni escritura. Para esos QR, copiar y borrar el original sigue rompiendo el destino; se debe mover el mismo archivo o restaurarlo de la papelera.
 
-Las propiedades privadas se leen con el cliente OAuth que las creó. Renovar su token o secreto no cambia esa identidad; sustituir el cliente OAuth por otro puede impedir que el portal lea esos registros nuevos. El enlace público del QR sigue dependiendo únicamente del archivo y sus permisos.
+Los registros usan hasta 30 propiedades privadas y 30 públicas, cada clave/valor de hasta 124 bytes, dentro del máximo total de Drive. Si no caben, se rechaza la emisión antes de publicar, sin truncar datos. El JSON descomprimido se limita a 64 KB.
 
-Render Free sigue pudiendo suspender el portal y perder sus archivos locales. Esto ya no afecta a los QR nuevos del modo Drive: la consulta mediante el QR va directamente a Google. La consulta con información adicional y la descarga desde el portal leen Drive, de modo que no necesitan registros locales. Debe mantenerse la autorización para que el portal pueda emitir y consultar registros. Revocar la autorización impide nuevas operaciones del portal, pero no elimina los PDFs existentes ni modifica sus enlaces públicos.
+**Disponibilidad:** los QR portables requieren conservar el dominio del portal, Render y la autorización de la cuenta de Drive. Render Free puede suspender el servidor y tardar en responder al primer acceso. Los registros y PDF no dependen del disco local, por lo que sobreviven a un reinicio. Los QR antiguos directos de Drive mantienen su comportamiento anterior y no pasan por Render.
 
 ## 1. Preparar la carpeta
 
@@ -91,17 +91,25 @@ Si eliges `drive` y faltan variables, la página abre pero deshabilita las emisi
 ## 7. Probar antes de emitir certificados reales
 
 1. Sube un Excel ficticio y descarga el PDF final. Comprueba el formato, la firma y que el QR aparezca en la ubicación de siempre.
-2. Pulsa **Abrir en Drive** o escanea el QR. Debe abrir una dirección `https://drive.google.com/file/d/.../view`, sin un dominio de Render.
+2. Pulsa **Probar QR** o escanea el QR nuevo. Debe abrir el PDF desde `/q/IDENTIFICADOR/CLAVE` en el dominio del portal. **Abrir en Drive** continúa abriendo directamente el archivo guardado.
 3. Abre ese mismo enlace en una ventana de incógnito, sin iniciar sesión. Debes poder consultar o descargar el PDF. Google decide cómo muestra la vista previa; comprueba también el PDF descargado.
 4. Mira la carpeta: debe aparecer directamente el PDF con su nombre, sin una nueva subcarpeta ni JSON. Solo el PDF debe tener acceso mediante enlace.
 5. Reinicia/despliega el servicio Render y vuelve a escanear el mismo QR. Después, comprueba también la consulta y la descarga desde el portal.
 6. Con un documento ficticio, usa **Organizar → Mover** en Drive para trasladar ese mismo PDF a otra carpeta de la misma cuenta. Conserva su permiso de lectura mediante enlace y comprueba el QR, la consulta y la descarga nuevamente. La búsqueda del registro nuevo utiliza su identificador de emisión, no su nombre ni su carpeta actual.
 
-### Mover y copiar son operaciones diferentes
+### Copias portables y QR anteriores
 
 Para reorganizar certificados conservando su QR, usa **Mover** (o cortar y pegar dentro de Drive). El archivo mantiene su identificador y el enlace del QR. La cuenta autorizada del portal debe conservar acceso al archivo, y sus destinatarios deben conservar el permiso de lectura mediante enlace.
 
-**Hacer una copia**, copiar y pegar o descargar y volver a subir puede crear otro archivo con un identificador diferente. El QR impreso en esa copia sigue apuntando al PDF original; no se redirige automáticamente. Conserva el original si necesitas ese QR. Aunque Drive copie también las propiedades técnicas, el portal reconoce el identificador del archivo emitido y evita confundir la copia con el original. Mover solo el PDF de una emisión antigua también conserva el enlace; deja su carpeta y JSON anteriores intactos para la consulta del portal.
+Para el QR portable nuevo, usa **Hacer una copia** o copiar y pegar **dentro de Drive**, en la misma cuenta. Conserva la copia sin modificar y prueba su QR después de eliminar el origen. La búsqueda utiliza el identificador de emisión; no basta con el nombre del archivo. Descargar y volver a subir, copiar a otra cuenta o cambiar de servicio puede perder las propiedades necesarias para localizar la copia y no está incluido en esta recuperación automática.
+
+Los QR anteriores directos de Google Drive siguen necesitando el archivo original. Mover solo el PDF de una emisión antigua conserva su enlace; deja su carpeta y JSON anteriores intactos para la consulta del portal.
+
+### Si ya se copió el PDF y se borró el original
+
+En los certificados anteriores, el enlace impreso en el QR es una dirección de Google Drive. Una actualización del portal no puede interceptar esa dirección ni reasignarla a un archivo diferente por tener el mismo nombre o contenido. Detectar la copia en el portal tampoco cambiaría el QR que ya se entregó.
+
+Si el original sigue en la papelera, usa **Restaurar** sobre ese archivo y luego **Organizar → Mover** para cambiarlo de carpeta conservando su identificador. No elimines otros certificados ni sus registros para intentar repararlo. Google indica que la papelera elimina los archivos tras 30 días; comprueba el caso en su [guía de recuperación](https://support.google.com/drive/answer/1716222?hl=es). Si se eliminó definitivamente, puede ser necesario solicitar recuperación a Google; si no se recupera el archivo original, hay que emitir un PDF con un QR nuevo.
 
 En un entorno de desarrollo con las variables configuradas de forma segura:
 
@@ -116,8 +124,12 @@ Esta comprobación renueva la autorización y verifica carpeta, permisos y acces
 
 Antes de emitir documentos reales, autoriza la cuenta de la empresa, crea una carpeta restringida de la empresa y reemplaza las variables de cuenta/carpeta en Render. Si se cambia el cliente OAuth, reemplaza también su ID y secreto. Repite la prueba.
 
-Cambiar la carpeta o la autorización afecta a las **emisiones nuevas**. No migra archivos ni modifica los QR anteriores. Los certificados de prueba seguirán dependiendo de sus archivos en tu cuenta personal; mantener su mismo QR al trasladarlos requiere una migración que preserve los identificadores de Drive y los permisos. No se incluye recuperación de certificados antiguos en este cambio, por indicación del usuario.
+Cambiar la carpeta o la autorización afecta a las **emisiones nuevas**. No migra archivos ni modifica los QR anteriores. Los QR antiguos directos seguirán dependiendo de sus archivos en la cuenta anterior. Los nuevos portables buscan copias en la cuenta autorizada, por lo que cambiar de cuenta no migra automáticamente sus documentos ni sus registros. No se incluye recuperación de certificados antiguos en este cambio, por indicación del usuario.
 
-Conserva copias de seguridad y no borres, reemplaces ni restrinjas los PDFs que deban seguir consultándose. Renombrar un PDF o moverlo dentro de la misma cuenta no cambia su identificador, pero hay que revisar los permisos heredados después de moverlo. Un QR no garantiza autenticidad ni permanencia por sí solo; su duración depende del archivo y del servicio al que apunta.
+Conserva copias de seguridad y al menos una copia nativa íntegra de cada PDF portable. Para los QR anteriores directos, conserva su archivo original y permiso de lectura. Renombrar un PDF o moverlo dentro de la misma cuenta no cambia su identificador, pero hay que revisar los permisos heredados después de moverlo. Un QR no garantiza autenticidad ni permanencia por sí solo; su duración depende del archivo y del servicio al que apunta.
 
 Referencias oficiales: [OAuth para aplicaciones de servidor](https://developers.google.com/identity/protocols/oauth2/web-server), [caducidad de refresh tokens](https://developers.google.com/identity/protocols/oauth2#expiration), [crear archivos con IDs reservados](https://developers.google.com/workspace/drive/api/guides/create-file), [propiedades privadas y sus límites](https://developers.google.com/workspace/drive/api/guides/properties), [cuentas de servicio y cuota](https://developers.google.com/workspace/drive/api/guides/handle-errors#storageQuotaExceeded).
+
+## Prueba automática de copia y eliminación
+
+`GET /api/pruebas/qr-portable.pdf` proporciona un PDF fijo **SIN VALIDEZ**. Solo ese contenido exacto puede enviarse a `/api/certificates` con `pdf`, `tipoCertificado=no_acreditado` y `pruebaCopia=true`. El servidor emite ese documento ficticio, hace una copia nativa en la raíz de la misma cuenta, elimina las propiedades privadas de la copia y comprueba su firma y bytes antes de eliminar definitivamente **solo el origen ficticio recién creado**. Después resuelve el mismo QR hacia la copia y devuelve `copyTest`. No acepta identificadores de archivos existentes ni permite usar esa opción con documentos de clientes. La copia ficticia queda en Drive con un nombre SIN VALIDEZ para revisar el resultado.

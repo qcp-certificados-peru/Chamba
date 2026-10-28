@@ -76,7 +76,30 @@
           <p class="submit-hint">Cada archivo tendrá su propio QR de consulta.</p>
           <p id="progress" class="progress" role="status" aria-live="polite"></p>
         </form>
-        <section id="results" class="results" aria-label="Resultados" hidden><div class="results-heading"><h3>Certificados del lote</h3><span>Descarga y comparte</span></div><div id="result-list"></div></section>
+        <section id="results" class="results" aria-label="Resultados" hidden>
+          <div class="results-heading"><h3>Certificados del lote</h3><span>Descarga y comparte</span></div>
+          <div id="result-list"></div>
+          <div id="portable-file-help" class="drive-file-help" hidden>
+            <h4>Tu QR puede abrir una copia válida</h4>
+            <p>Puedes copiar este PDF a otra carpeta de la <strong>misma cuenta de Drive</strong> y eliminar el original. Conserva la copia sin modificar: el portal comprobará que corresponda al mismo certificado.</p>
+            <p>Haz la copia desde Drive. Descargar y volver a subir puede perder el registro necesario para localizarla. Si eliminas todas las copias, el QR dejará de tener un PDF disponible.</p>
+            <p>Este QR abre el PDF a través del portal QCP. Mantén disponible el portal y su dirección para seguir consultándolo.</p>
+          </div>
+          <div id="drive-file-help" class="drive-file-help" hidden>
+            <h4>Cambia de carpeta conservando el QR</h4>
+            <p>En Drive, selecciona el PDF y usa <strong>Organizar → Mover</strong>. Puede estar en otra carpeta de la misma cuenta; conserva su permiso de lectura mediante enlace.</p>
+            <p><strong>Hacer una copia crea otro archivo.</strong> El QR de esa copia sigue abriendo el original. Si eliminas el original, ese QR puede dejar de funcionar.</p>
+            <details>
+              <summary>¿Copiaste el PDF y eliminaste el original?</summary>
+              <ol>
+                <li>Abre la <a href="https://drive.google.com/drive/trash" target="_blank" rel="noopener noreferrer">papelera de Drive</a> de la cuenta que emitió el certificado.</li>
+                <li>Busca el PDF original y elige <strong>Restaurar</strong>.</li>
+                <li>Mueve ese mismo PDF a la carpeta de destino y vuelve a escanear el QR.</li>
+              </ol>
+              <p>Una actualización del portal no puede redirigir el enlace de Google ya impreso en el QR. Si el original se eliminó definitivamente y no se puede recuperar, habrá que emitir un PDF con un QR nuevo. <a href="https://support.google.com/drive/answer/1716222?hl=es" target="_blank" rel="noopener noreferrer">Ayuda de Google para recuperar archivos</a>.</p>
+            </details>
+          </div>
+        </section>
       </section>
     </div>
     <section id="guia" class="guide" aria-labelledby="guide-title">

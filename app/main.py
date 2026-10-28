@@ -174,6 +174,11 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     async def health():
         return {"status": "ok"}
 
+    @app.get("/api/pruebas/qr-portable.pdf")
+    async def portable_test_source():
+        from app.portable_smoke import fixture_pdf
+        return Response(fixture_pdf(), media_type="application/pdf", headers={"Cache-Control": "no-store"})
+
     @app.get("/api/config")
     async def configuration():
         return {"requiresAccessKey": False, "uploadsEnabled": store.ready,
@@ -194,18 +199,23 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     async def terms():
         return HTMLResponse(pages["terms.html"])
 
+    async def stored_info(certificate_id: UUID, key: str | None):
+        if isinstance(store, DriveStorage):
+            return await asyncio.to_thread(store.metadata, str(certificate_id), key)
+        return await asyncio.to_thread(store.metadata, str(certificate_id))
+
     @app.get("/certificados/{certificate_id}")
-    async def certificate_page(certificate_id: UUID):
-        await asyncio.to_thread(store.metadata, str(certificate_id))
+    async def certificate_page(certificate_id: UUID, key: str | None = None):
+        await stored_info(certificate_id, key)
         return HTMLResponse(pages["verify.html"], headers={"Cache-Control": "no-store"})
 
     @app.get("/api/certificates/{certificate_id}")
-    async def details(certificate_id: UUID):
-        return await asyncio.to_thread(store.metadata, str(certificate_id))
+    async def details(certificate_id: UUID, key: str | None = None):
+        return await stored_info(certificate_id, key)
 
     @app.get("/api/certificates/{certificate_id}/download")
-    async def download(certificate_id: UUID):
-        info = await asyncio.to_thread(store.metadata, str(certificate_id))
+    async def download(certificate_id: UUID, key: str | None = None):
+        info = await stored_info(certificate_id, key)
         if isinstance(store, LocalStorage):
             return FileResponse(store.local_pdf(str(certificate_id)), media_type="application/pdf",
                                 filename=info["filename"], headers={"Cache-Control": "no-store"})
@@ -213,11 +223,28 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
         return Response(pdf, media_type="application/pdf", headers={"Cache-Control": "no-store",
             "Content-Disposition": f"attachment; filename*=utf-8''{quote(info['filename'])}"})
 
+    @app.get("/q/{certificate_id}/{public_key}")
+    async def portable_certificate(certificate_id: UUID, public_key: str):
+        if not isinstance(store, DriveStorage):
+            raise HTTPException(404, "Este QR requiere el almacenamiento de Drive.")
+        for attempt in range(2):
+            info = await asyncio.to_thread(store.portable_metadata, str(certificate_id), public_key)
+            try:
+                pdf = await asyncio.to_thread(store.download, info)
+            except StorageError as error:
+                # The original can disappear between discovery and download.
+                # Resolve once more, still requiring the same key and PDF hash.
+                if attempt or error.status not in {404, 409}:
+                    raise
+                continue
+            return Response(pdf, media_type="application/pdf", headers={"Cache-Control": "no-store",
+                "Content-Disposition": f"inline; filename*=utf-8''{quote(info['filename'])}"})
+
     @app.post("/api/certificates", status_code=201)
     async def create_certificate(response: Response, excel: UploadFile | None = File(None), pdf: UploadFile | None = File(None), codigoCorrecto: str = Form(""),
                                  firma: UploadFile | None = File(None), tipoCertificado: str = Form(""),
                                  codigoFormato: str = Form(''), versionFormato: str = Form(''),
-                                 excelToken: str = Form("")):
+                                 excelToken: str = Form(""), pruebaCopia: bool = Form(False)):
         started = perf_counter()
         if not store.ready:
             raise StorageError("Falta completar la conexión con Google Drive. Contacta al administrador.")
@@ -237,6 +264,10 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
             source_name = document.filename
             data = await read_upload(document, MAX_PDF_BYTES)
         filename = filename_safe(source_name, source_type)
+        if pruebaCopia:
+            from app.portable_smoke import fixture_pdf
+            if not isinstance(store, DriveStorage) or source_type != "pdf" or data != fixture_pdf():
+                raise HTTPException(422, "La prueba de copia solo admite el PDF ficticio SIN VALIDEZ proporcionado por el portal.")
         if len(codigoCorrecto) > MAX_CODE_LENGTH:
             raise HTTPException(422, CODE_ERROR)
         try:
@@ -283,11 +314,16 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
                     "sha256": hashlib.sha256(result.data).hexdigest(),
                     "verificationUrl": verification_url,
                     "downloadUrl": f"/api/certificates/{certificate_id}/download"}
+            if publication.public_key:
+                info["downloadUrl"] += f"?key={publication.public_key}"
             if source_type == "xlsx" or pdf_only:
                 info.update(certificateType=result.certificate_type, backgroundVerified=bool(result.background_pages),
                             backgroundPages=result.background_pages, formatPreserved=result.format_preserved,
                             sheetName=result.sheet_name, formatFooterVerified=result.format_footer_verified)
             await asyncio.to_thread(store.save, certificate_id, result.data, info, publication)
+            if pruebaCopia:
+                info, proof = await asyncio.to_thread(store.exercise_fresh_test_copy, info)
+                info["copyTest"] = proof
             if excelToken:
                 await asyncio.to_thread(inspections.discard, excelToken)
             saved = perf_counter()
