@@ -103,6 +103,12 @@ Para reorganizar certificados conservando su QR, usa **Mover** (o cortar y pegar
 
 **Hacer una copia**, copiar y pegar o descargar y volver a subir puede crear otro archivo con un identificador diferente. El QR impreso en esa copia sigue apuntando al PDF original; no se redirige automáticamente. Conserva el original si necesitas ese QR. Aunque Drive copie también las propiedades técnicas, el portal reconoce el identificador del archivo emitido y evita confundir la copia con el original. Mover solo el PDF de una emisión antigua también conserva el enlace; deja su carpeta y JSON anteriores intactos para la consulta del portal.
 
+### Si ya se copió el PDF y se borró el original
+
+El enlace impreso en el QR es una dirección de Google Drive. Una actualización del portal no puede interceptar esa dirección ni reasignarla a un archivo diferente por tener el mismo nombre o contenido. Detectar la copia en el portal tampoco cambiaría el QR que ya se entregó.
+
+Si el original sigue en la papelera, usa **Restaurar** sobre ese archivo y luego **Organizar → Mover** para cambiarlo de carpeta conservando su identificador. No elimines otros certificados ni sus registros para intentar repararlo. Google indica que la papelera elimina los archivos tras 30 días; comprueba el caso en su [guía de recuperación](https://support.google.com/drive/answer/1716222?hl=es). Si se eliminó definitivamente, puede ser necesario solicitar recuperación a Google; si no se recupera el archivo original, hay que emitir un PDF con un QR nuevo.
+
 En un entorno de desarrollo con las variables configuradas de forma segura:
 
 ```sh

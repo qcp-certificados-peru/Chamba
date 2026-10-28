@@ -279,6 +279,7 @@ function addResult(file, result, error) {
     verify.append(externalIcon);
     actions.append(download, verify);
     card.append(actions);
+    if (result.driveUrl) $("drive-file-help").hidden = false;
   }
   $("result-list").append(card);
 }
@@ -303,6 +304,7 @@ $("certificate-form").addEventListener("submit", async (event) => {
   $("signature").disabled = true;
   $("submit").textContent = "Preparando…";
   $("result-list").replaceChildren();
+  $("drive-file-help").hidden = true;
   $("results").hidden = false;
   const failed = [];
   const batch = [...files];
