@@ -11,6 +11,7 @@ from app.drive_records import encode_record
 from app.main import create_app
 from app.portable_qr import new_key, signed_record, verified_record
 from app.portable_smoke import fixture_pdf
+from app.storage import Publication, StorageError
 from test_drive import FakeDrive, ROOT
 from test_drive_flat import legacy_record
 from test_portal import pdf_bytes, upload
@@ -153,3 +154,16 @@ def test_public_record_contains_no_private_key_and_fits_drive_limits():
     assert verified_record(properties, info["id"], public) == info
     assert len(properties) <= 30 and all(len(k.encode()) + len(v.encode()) <= 124 for k, v in properties.items())
     assert private.hex() not in str(properties) and "signing_key" not in str(properties)
+
+
+def test_publication_id_cannot_be_reissued_after_only_a_copy_remains():
+    drive = FakeDrive()
+    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+        info = upload(client).json()
+        row = drive.files.pop(info['driveFileId']);copy_id=drive.new_id()
+        drive.files[copy_id]={**row,'id':copy_id,'appProperties':{}}
+    before=deepcopy(drive.files);store=drive.storage()
+    with pytest.raises(StorageError)as error:
+        store.save(info['id'],row['content'],info,Publication(info['verificationUrl'],drive.new_id()))
+    assert error.value.status==409 and drive.files==before
+    store.close()

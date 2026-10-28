@@ -87,9 +87,8 @@ class FakeDrive:
                 assert "name = 'metadata.json'" in query
                 rows = [row for row in rows if row.get("name") == "metadata.json"]
             offset = int(request.url.params.get("pageToken", "0"))
-            for row in rows:
-                if row.get("mimeType") == "application/pdf":
-                    row["sha256Checksum"] = hashlib.sha256(row["content"]).hexdigest()
+            rows = [{**row, "sha256Checksum": hashlib.sha256(row["content"]).hexdigest()}
+                    if row.get("mimeType") == "application/pdf" else row for row in rows]
             result = {"files": [
                 {key: value for key, value in row.items() if key in {"id", "name", "mimeType", "appProperties", "properties", "sha256Checksum"}}
                 for row in rows[offset:offset + 100]]}

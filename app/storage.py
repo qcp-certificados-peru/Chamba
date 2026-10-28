@@ -251,7 +251,7 @@ class DriveStorage:
         with self.write_lock:
             existing = self._list(self.folder_id, "mimeType = 'application/vnd.google-apps.folder' and "
                                  f"appProperties has {{ key='qcp_certificate_id' and value='{identifier}' }}")
-            if existing or self._record_pdf(identifier):
+            if existing or self._record_pdf(identifier) or self._portable_records(identifier):
                 raise StorageError("El certificado ya existe; se conservó el registro anterior.", 409)
             if metadata.get("id") != identifier:
                 raise StorageError("El registro no corresponde a la emisión solicitada.", 422)
@@ -274,7 +274,8 @@ class DriveStorage:
                 if actual_id != file_id:
                     raise StorageError("Google Drive no conservó el enlace reservado del certificado.")
                 created = True
-                # Publish only the newly created PDF; properties stay app-private.
+                # Private properties remain private; the signed public record
+                # travels with the published PDF and its native Drive copies.
                 self._request("POST", f"/files/{file_id}/permissions", params={"supportsAllDrives": "true"},
                               json={"type": "anyone", "role": "reader", "allowFileDiscovery": False})
                 metadata.update(info)
@@ -286,10 +287,7 @@ class DriveStorage:
                         logger.warning("No se pudo limpiar el PDF de una publicación incompleta en Drive.")
                 raise
 
-    def portable_metadata(self, certificate_id: str, public_key: str | None = None) -> dict:
-        identifier = str(UUID(certificate_id))
-        if public_key is not None and not KEY.fullmatch(public_key):
-            raise StorageError("El enlace de consulta del certificado no es válido.", 404)
+    def _portable_records(self, identifier: str, public_key: str | None = None) -> list[tuple[dict, dict]]:
         # Public properties survive native Drive copies made by other clients.
         # Restrict discovery to this account's files, never adopt a shared forgery.
         rows = self._list(None, "'me' in owners and mimeType = 'application/pdf' and "
@@ -302,6 +300,13 @@ class DriveStorage:
             except (ValueError, StorageError):
                 continue
             candidates.append((row, info))
+        return candidates
+
+    def portable_metadata(self, certificate_id: str, public_key: str | None = None) -> dict:
+        identifier = str(UUID(certificate_id))
+        if public_key is not None and not KEY.fullmatch(public_key):
+            raise StorageError("El enlace de consulta del certificado no es válido.", 404)
+        candidates = self._portable_records(identifier, public_key)
         # Prefer the issued file while it is intact. Identical copies are valid
         # alternatives; names, folders and copied private properties are irrelevant.
         candidates.sort(key=lambda item: (item[0]["id"] != item[1].get("issuedDriveFileId"), item[0]["id"]))
