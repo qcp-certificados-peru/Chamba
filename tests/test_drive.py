@@ -147,8 +147,9 @@ class FakeDrive:
             return httpx.Response(404)
         if permissions:
             if request.method == "GET":
-                assert self.files[file_id]['mimeType']=='application/vnd.google-apps.folder'
-                return httpx.Response(200, json={"permissions": self.root_permissions if file_id==ROOT else [{'type':'user'}]})
+                if self.files[file_id]['mimeType']=='application/vnd.google-apps.folder':
+                    return httpx.Response(200, json={"permissions": self.root_permissions if file_id==ROOT else [{'type':'user'}]})
+                return httpx.Response(200, json={"permissions": [grant for fid,grant in self.permissions if fid==file_id]})
             if self.fail_permission:
                 return httpx.Response(403)
             self.permissions.append((file_id, json.loads(request.content)))
