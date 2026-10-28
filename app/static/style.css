@@ -137,6 +137,11 @@ input::file-selector-button { cursor: pointer; border: 0; border-radius: 4px; pa
 .results-heading { display: flex; justify-content: space-between; gap: 15px; align-items: center; }
 .results-heading h3 { font-size: 15px; font-weight: 600; margin: 0; }
 .results-heading span { color: var(--muted); font-size: 10px; }
+.batch-export { margin: 16px 0; }
+.export-button { padding: 11px 14px; min-height: 44px; border: 1px solid var(--mint); border-radius: 6px; color: var(--mint); background: #13382d; font-size: 12px; font-weight: 600; cursor: pointer; }
+.export-button:hover { background: #1b493b; }
+.export-button:disabled { opacity: .55; cursor: not-allowed; }
+.batch-export p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .result-card { border: 1px solid #3b6656; background: #102c27; border-radius: 10px; padding: 17px; margin-top: 13px; font-size: 12px; overflow-wrap: anywhere; }
 .result-label { color: #9ce7c4; font-size: 9px; letter-spacing: 1px; font-weight: 700; margin-bottom: 6px; }
 .result-label.failed { color: #f6bdb1; }
