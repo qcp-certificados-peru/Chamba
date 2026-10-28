@@ -23,7 +23,10 @@ def main():
         assert health.status_code == 200
         if args.expected_revision:
             assert health.headers.get("x-app-revision") == args.expected_revision
-        assert client.get(base + "/api/config").json()["storageBackend"] == "drive"
+        config = client.get(base + "/api/config").json()
+        assert config["storageBackend"] == "drive"
+        if config.get("qrMode") == "drive-direct":
+            raise SystemExit("Las emisiones actuales usan QR directo: ejecuta scripts/check_direct_drive_qr.py.")
         source = client.get(base + "/api/pruebas/qr-portable.pdf")
         assert source.status_code == 200 and source.content.startswith(b"%PDF-")
         started = perf_counter()

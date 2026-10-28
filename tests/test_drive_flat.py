@@ -78,7 +78,7 @@ def test_moving_only_an_older_pdf_keeps_legacy_json_and_lookup_untouched():
 
 def test_signed_drive_copy_serves_same_pdf_after_original_is_deleted():
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         info = upload(client).json()
         original_id = info["driveFileId"]
         copied_id = drive.new_id()

@@ -174,6 +174,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     async def health():
         return {"status": "ok"}
 
+    @app.get("/api/pruebas/qr-directo.pdf")
     @app.get("/api/pruebas/qr-portable.pdf")
     async def portable_test_source():
         from app.portable_smoke import fixture_pdf
@@ -183,6 +184,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     async def configuration():
         return {"requiresAccessKey": False, "uploadsEnabled": store.ready,
                 "localMode": is_local and store.backend == "local", "storageBackend": store.backend,
+                "qrMode": store.qr_mode,
                 "maxPdfMB": 15, "maxExcelMB": 15, "maxSignatureMB": 2, "maxPages": 100,
                 "certificateCodePattern": CODE_PATTERN, "maxCodeLength": MAX_CODE_LENGTH,
                 "inputFormats": ["xlsx", "xlsm", "pdf"], "certificateBackgrounds": background_choices()}
@@ -238,10 +240,13 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     async def create_certificate(response: Response, excel: UploadFile | None = File(None), pdf: UploadFile | None = File(None), codigoCorrecto: str = Form(""),
                                  firma: UploadFile | None = File(None), tipoCertificado: str = Form(""),
                                  codigoFormato: str = Form(''), versionFormato: str = Form(''),
-                                 excelToken: str = Form(""), pruebaCopia: bool = Form(False)):
+                                 excelToken: str = Form(""), pruebaCopia: bool = Form(False),
+                                 pruebaMovimiento: bool = Form(False)):
         started = perf_counter()
         if not store.ready:
             raise StorageError("Falta completar la conexión con Google Drive. Contacta al administrador.")
+        if pruebaCopia and store.qr_mode != "portable-v1":
+            raise HTTPException(422, "Los QR nuevos abren directamente Drive. Usa Mover o Cortar y pegar; la prueba actual es pruebaMovimiento.")
         if sum((excel is not None, pdf is not None, bool(excelToken))) != 1:
             raise HTTPException(422, "Sube un Excel .xlsx, .xlsm o un PDF por solicitud.")
         source_type = "xlsx" if excel or excelToken else "pdf"
@@ -262,6 +267,11 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
             from app.portable_smoke import fixture_pdf
             if not isinstance(store, DriveStorage) or source_type != "pdf" or data != fixture_pdf():
                 raise HTTPException(422, "La prueba de copia solo admite el PDF ficticio SIN VALIDEZ proporcionado por el portal.")
+        if pruebaMovimiento:
+            from app.portable_smoke import fixture_pdf
+            if (not isinstance(store, DriveStorage) or store.qr_mode != "drive-direct"
+                    or source_type != "pdf" or data != fixture_pdf()):
+                raise HTTPException(422, "La prueba de movimiento solo admite el PDF ficticio SIN VALIDEZ proporcionado por el portal.")
         if len(codigoCorrecto) > MAX_CODE_LENGTH:
             raise HTTPException(422, CODE_ERROR)
         try:
@@ -318,6 +328,8 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
             if pruebaCopia:
                 info, proof = await asyncio.to_thread(store.exercise_fresh_test_copy, info)
                 info["copyTest"] = proof
+            if pruebaMovimiento:
+                info["moveTest"] = await asyncio.to_thread(store.exercise_fresh_test_move, info)
             if excelToken:
                 await asyncio.to_thread(inspections.discard, excelToken)
             saved = perf_counter()
