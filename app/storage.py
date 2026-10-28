@@ -576,6 +576,13 @@ class DriveStorage:
         except (StorageError, ValueError) as error:
             return info, {"ok": False, "originalDeleted": deleted, "detail": str(error)}
 
+    def viewer_url(self, certificate_id: str, public_key: str) -> str:
+        info = self.portable_metadata(certificate_id, public_key)
+        # Build the destination from the checked ID, never from caller input or
+        # a stored URL. Drive enforces the selected file's own reader permissions.
+        file_id = self._id(info.get("driveFileId"))
+        return f"https://drive.google.com/file/d/{file_id}/view"
+
     def download(self, metadata: dict) -> bytes:
         file_id = self._id(metadata.get("driveFileId"))
         headers = {"Authorization": f"Bearer {self._token()}"}

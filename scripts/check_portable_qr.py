@@ -38,10 +38,14 @@ def main():
         assert info['copyTest']['customPropertiesRemoved']
         assert info["driveFileId"] != info["issuedDriveFileId"]
         assert info["verificationUrl"].startswith(base + "/q/")
-        pdf = client.get(info["verificationUrl"])
-        assert pdf.status_code == 200 and "inline;" in pdf.headers["content-disposition"]
+        qr_response = client.get(info["verificationUrl"], follow_redirects=False)
+        assert qr_response.status_code == 303
+        assert qr_response.headers["location"] == info["driveUrl"]
+        assert qr_response.headers["cache-control"] == "no-store"
+        assert not qr_response.content and "content-disposition" not in qr_response.headers
+        pdf = client.get(base + info["downloadUrl"])
+        assert pdf.status_code == 200
         assert hashlib.sha256(pdf.content).hexdigest() == info["sha256"]
-        assert client.get(base + info["downloadUrl"]).content == pdf.content
         with pymupdf.open(stream=pdf.content, filetype="pdf") as doc:
             assert len(doc) == 1 and "SIN VALIDEZ" in doc[0].get_text()
             links = [link for link in doc[0].get_links() if link.get("uri") == info["verificationUrl"]]
@@ -52,7 +56,7 @@ def main():
         print(json.dumps({"source": "server-generated SIN VALIDEZ PDF", "pages": 1,
             "seconds": round(elapsed, 2), "serverTiming": response.headers.get("server-timing"),
             "originalPermanentlyDeleted": True, "copyWithoutPrivateProperties": True,
-            "qrDecoded": True, "sha256Verified": True, "qrUrl": info["verificationUrl"],
+            "qrDecoded": True, "sha256Verified": True, "googleViewerRedirect": True, "qrUrl": info["verificationUrl"],
             "copyDriveUrl": info["driveUrl"]}, ensure_ascii=False, indent=2))
 
 
