@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 import httpx
 
 from app.drive_records import decode_record, encode_record, original_file
-from app.portable_qr import KEY, MODE, new_key, signed_record, verified_record
+from app.portable_qr import KEY, MODE, signed_record, verified_record
 
 logger = logging.getLogger(__name__)
 DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -40,6 +40,7 @@ class Publication:
 
 class LocalStorage:
     backend = "local"
+    qr_mode = "portal-local"
     ready = True
 
     def __init__(self, directory: Path, quota: int):
@@ -90,6 +91,7 @@ class LocalStorage:
 
 class DriveStorage:
     backend = "drive"
+    qr_mode = "drive-direct"
 
     def __init__(self, folder_id: str, client_id: str, client_secret: str, refresh_token: str,
                  client: httpx.Client | None = None):
@@ -234,8 +236,9 @@ class DriveStorage:
             file_id = self._id(result["ids"][0])
         except (KeyError, IndexError, TypeError):
             raise StorageError("No se pudo reservar el enlace del certificado en Google Drive.") from None
-        public, private = new_key()
-        return Publication(f"{origin}/q/{certificate_id}/{public}", file_id, public, private)
+        # Pin the Google file ID before placing the QR. Moving/renaming this
+        # same file preserves its link, independent of the portal's availability.
+        return Publication(f"https://drive.google.com/file/d/{file_id}/view", file_id)
 
     def _upload(self, metadata: dict, data: bytes, mime: str) -> str:
         boundary = "qcp_" + uuid4().hex
@@ -259,6 +262,7 @@ class DriveStorage:
             if metadata.get("id") != identifier:
                 raise StorageError("El registro no corresponde a la emisión solicitada.", 422)
             info = {**metadata, "storageBackend": "drive", "driveFileId": file_id,
+                    "qrMode": MODE if publication.public_key else "drive-direct",
                     "driveUrl": f"https://drive.google.com/file/d/{file_id}/view"}
             if publication.public_key:
                 info.update(qrMode=MODE, qrPublicKey=publication.public_key, issuedDriveFileId=file_id,
@@ -545,6 +549,29 @@ class DriveStorage:
                 or not isinstance(info.get("filename"), str) or not re.fullmatch(r"[a-f0-9]{64}", str(info.get("sha256", "")))):
             raise StorageError("El registro del certificado no es válido.")
         return info
+
+    def exercise_fresh_test_move(self, info: dict) -> dict:
+        """Move/rename only the fresh, fixed SIN VALIDEZ fixture from this request.
+
+        The caller cannot supply a Drive ID. No copy or deletion is performed.
+        """
+        file_id = self._id(info["driveFileId"])
+        try:
+            self.download(info)
+            moved = self._json(self._request("PATCH", f"/files/{file_id}", params={
+                "addParents": "root", "removeParents": self.folder_id, "supportsAllDrives": "true",
+                "fields": "id,name,parents"}, json={"name": "PRUEBA-MOVIDO-QR-DIRECTO-SIN-VALIDEZ.pdf"}))
+            if (moved.get("id") != file_id or self.folder_id in moved.get("parents", [])
+                    or not moved.get("parents")):
+                raise StorageError("Drive no confirmó el movimiento del PDF ficticio.")
+            self.download(info)
+            if not self._public_reader(file_id):
+                raise StorageError("El PDF ficticio movido no conservó su permiso de lectura por enlace.")
+            return {"ok": True, "sameFileId": True, "sameQr": True,
+                    "movedOutsideOutputFolder": True,
+                    "renamed": moved.get("name") == "PRUEBA-MOVIDO-QR-DIRECTO-SIN-VALIDEZ.pdf"}
+        except StorageError as error:
+            return {"ok": False, "detail": str(error)}
 
     def exercise_fresh_test_copy(self, info: dict) -> tuple[dict, dict]:
         """Only called for a freshly issued, byte-checked SIN VALIDEZ fixture.

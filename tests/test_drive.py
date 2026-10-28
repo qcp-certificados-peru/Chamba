@@ -18,11 +18,22 @@ import pytest
 import zxingcpp
 
 from app.main import create_app
-from app.storage import DriveStorage, LocalStorage, StorageError, storage_from_environment
+from app.storage import DriveStorage, LocalStorage, Publication, StorageError, storage_from_environment
+from app.portable_qr import new_key
 from test_excel import workbook_bytes
 from test_portal import pdf_bytes, upload
 
 ROOT = "folder_for_synthetic_tests_only"
+
+
+class EarlierPortableStorage(DriveStorage):
+    """Emulate a previous release's issuance to test already printed QR URLs."""
+    qr_mode = "portable-v1"
+
+    def allocate(self, certificate_id, origin):
+        direct = super().allocate(certificate_id, origin)
+        public, private = new_key()
+        return Publication(f"{origin}/q/{certificate_id}/{public}", direct.drive_file_id, public, private)
 
 
 class FakeDrive:
@@ -45,8 +56,9 @@ class FakeDrive:
         # Match real Drive IDs in length to exercise QR density.
         return "synthetic_" + str(self.counter).zfill(34)
 
-    def storage(self):
-        return DriveStorage(ROOT, "synthetic-client", "synthetic-secret", "synthetic-refresh",
+    def storage(self, *, portable=False):
+        storage_class = EarlierPortableStorage if portable else DriveStorage
+        return storage_class(ROOT, "synthetic-client", "synthetic-secret", "synthetic-refresh",
                             client=httpx.Client(transport=httpx.MockTransport(self.handle)))
 
     def handle(self, request):
@@ -159,6 +171,15 @@ class FakeDrive:
             for key in descendants + [file_id]:
                 del self.files[key]
             return httpx.Response(204)
+        if request.method == "PATCH":
+            row = self.files[file_id]
+            removed = request.url.params.get("removeParents", "").split(",")
+            row["parents"] = [parent for parent in row.get("parents", []) if parent not in removed]
+            added = request.url.params.get("addParents")
+            if added:
+                row["parents"].extend(added.split(","))
+            row.update(json.loads(request.content))
+            return httpx.Response(200, json={key: value for key, value in row.items() if key != "content"})
         assert request.method == "GET"
         row = self.files[file_id]
         if request.url.params.get("alt") == "media":
@@ -192,7 +213,8 @@ def test_drive_excel_survives_loss_of_local_storage_and_domain_change(tmp_path, 
         assert info["certificateType"] == "acreditado"
         assert info["backgroundVerified"] is True
         assert info["backgroundPages"] == [1, 2]
-        assert info["verificationUrl"] == f"https://old.example.com/q/{info['id']}/{info['qrPublicKey']}"
+        assert info["verificationUrl"] == f"https://drive.google.com/file/d/{info['driveFileId']}/view"
+        assert info["qrMode"] == "drive-direct" and "qrPublicKey" not in info
         assert info["driveUrl"] == f"https://drive.google.com/file/d/{info['driveFileId']}/view"
         download = client.get(info["downloadUrl"])
         assert download.status_code == 200

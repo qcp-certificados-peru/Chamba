@@ -1,4 +1,4 @@
-"""New QR survives native Drive copies; old QR never changes its destination."""
+"""Compatibility for earlier portable QR URLs; current issuance uses Drive directly."""
 
 from copy import deepcopy
 import hashlib
@@ -22,7 +22,7 @@ from test_portal import pdf_bytes, upload
 
 def test_qr_opens_google_viewer_without_pdf_download_or_portal_page(monkeypatch):
     drive = FakeDrive()
-    store = drive.storage()
+    store = drive.storage(portable=True)
     with TestClient(create_app(certificate_storage=store)) as client:
         info = upload(client).json()
         def unnecessary_download(*args):
@@ -43,7 +43,7 @@ def test_qr_opens_google_viewer_without_pdf_download_or_portal_page(monkeypatch)
 
 def test_same_qr_follows_a_second_copy_instead_of_caching_first_destination():
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         info = upload(client).json()
         assert client.get(info["verificationUrl"], follow_redirects=False).headers["location"] == info["driveUrl"]
         row = drive.files.pop(info["driveFileId"])
@@ -57,7 +57,7 @@ def test_same_qr_follows_a_second_copy_instead_of_caching_first_destination():
 
 @pytest.mark.parametrize("public_copy_policy", [False, True])
 def test_only_new_signed_public_copy_policy_can_share_the_selected_copy(public_copy_policy):
-    drive = FakeDrive(); store = drive.storage()
+    drive = FakeDrive(); store = drive.storage(portable=True)
     identifier = str(uuid4()); public, private = new_key()
     original, copied = drive.new_id(), drive.new_id()
     pdf = pdf_bytes()
@@ -81,7 +81,7 @@ def test_only_new_signed_public_copy_policy_can_share_the_selected_copy(public_c
 
 def test_a_failed_copy_permission_does_not_redirect_or_publish_other_files():
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         info = upload(client).json()
         original = drive.files.pop(info["driveFileId"]); copied = drive.new_id()
         drive.files[copied] = {**original, "id": copied, "appProperties": {}}
@@ -94,7 +94,7 @@ def test_a_failed_copy_permission_does_not_redirect_or_publish_other_files():
 @pytest.mark.parametrize("permanent", [False, True])
 def test_same_printed_qr_works_after_copy_and_trash_or_delete_original(permanent):
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         info = upload(client).json()
         original = info["driveFileId"]
         pdf = client.get(info["downloadUrl"]).content
@@ -108,7 +108,7 @@ def test_same_printed_qr_works_after_copy_and_trash_or_delete_original(permanent
             drive.files[original]["trashed"] = True
         before = deepcopy(drive.files); writes = list(drive.writes)
     # No disk/cache or original private metadata is needed after a restart.
-    with TestClient(create_app(certificate_storage=drive.storage())) as restarted:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as restarted:
         qr = restarted.get(info["verificationUrl"], follow_redirects=False)
         assert qr.status_code == 303, qr.text
         assert qr.headers["location"] == f"https://drive.google.com/file/d/{copied_id}/view"
@@ -130,7 +130,7 @@ def test_same_printed_qr_works_after_copy_and_trash_or_delete_original(permanent
 @pytest.mark.parametrize("damage", ["pdf", "record", "key", "foreign_owner"])
 def test_a_changed_or_forged_copy_never_replaces_the_issued_pdf(damage):
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         info = upload(client).json(); original = info["driveFileId"]
         copied_id = drive.new_id(); row = deepcopy(drive.files.pop(original)); row["id"] = copied_id
         if damage == "pdf":
@@ -162,7 +162,7 @@ def test_a_changed_or_forged_copy_never_replaces_the_issued_pdf(damage):
 
 def test_valid_copy_is_selected_among_bad_copies_and_identical_names():
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         first = upload(client).json(); second = upload(client).json()
         original = drive.files.pop(first["driveFileId"])
         bad_id, good_id = drive.new_id(), drive.new_id()
@@ -178,7 +178,7 @@ def test_valid_copy_is_selected_among_bad_copies_and_identical_names():
 def test_diagnostic_copies_only_its_fresh_fictitious_pdf_then_deletes_its_source():
     drive = FakeDrive(); legacy_record(drive); before = deepcopy(drive.files)
     assert fixture_pdf() == fixture_pdf()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         source = client.get("/api/pruebas/qr-portable.pdf").content
         response = client.post("/api/certificates", files={"pdf": ("PRUEBA-SIN-VALIDEZ.pdf", source)},
                                data={"tipoCertificado": "no_acreditado", "pruebaCopia": "true"})
@@ -196,7 +196,7 @@ def test_diagnostic_copies_only_its_fresh_fictitious_pdf_then_deletes_its_source
 
 def test_diagnostic_flag_cannot_copy_or_delete_a_real_upload():
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         response = client.post("/api/certificates", files={"pdf": ("PRUEBA-SIN-VALIDEZ.pdf", pdf_bytes())},
                                data={"tipoCertificado": "no_acreditado", "pruebaCopia": "true"})
         assert response.status_code == 422
@@ -211,7 +211,7 @@ def test_diagnostic_keeps_source_if_new_copy_is_not_identical():
                 self.files[response.json()['id']]['content'] += b'changed'
             return response
     drive = DamagedCopyDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         response = client.post('/api/certificates',files={'pdf':('TEST.pdf',fixture_pdf())},
                                data={'tipoCertificado':'no_acreditado','pruebaCopia':'true'})
         assert response.status_code == 201,response.text
@@ -224,7 +224,7 @@ def test_diagnostic_keeps_source_if_new_copy_is_not_identical():
 
 def test_single_page_pdf_can_be_issued_and_reissued_with_a_new_qr():
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         first = client.post("/api/certificates", files={"pdf": ("TEST.pdf", fixture_pdf())},
                             data={"tipoCertificado": "no_acreditado"})
         assert first.status_code == 201, first.text
@@ -248,11 +248,11 @@ def test_public_record_contains_no_private_key_and_fits_drive_limits():
 
 def test_publication_id_cannot_be_reissued_after_only_a_copy_remains():
     drive = FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True))) as client:
         info = upload(client).json()
         row = drive.files.pop(info['driveFileId']);copy_id=drive.new_id()
         drive.files[copy_id]={**row,'id':copy_id,'appProperties':{}}
-    before=deepcopy(drive.files);store=drive.storage()
+    before=deepcopy(drive.files);store=drive.storage(portable=True)
     with pytest.raises(StorageError)as error:
         store.save(info['id'],row['content'],info,Publication(info['verificationUrl'],drive.new_id()))
     assert error.value.status==409 and drive.files==before
@@ -270,7 +270,7 @@ def test_copy_is_used_if_original_disappears_during_qr_lookup():
                 return httpx.Response(404)
             return super().handle(request)
     drive=ConcurrentDeleteDrive()
-    with TestClient(create_app(certificate_storage=drive.storage()))as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True)))as client:
         info=upload(client).json();original=info['driveFileId'];copy_id=drive.new_id()
         drive.files[copy_id]={**deepcopy(drive.files[original]),'id':copy_id,'appProperties':{}}
         drive.delete_on_lookup=original
@@ -282,7 +282,7 @@ def test_copy_is_used_if_original_disappears_during_qr_lookup():
 
 def test_first_portable_format_can_recover_its_record_from_trash():
     drive=FakeDrive()
-    with TestClient(create_app(certificate_storage=drive.storage()))as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True)))as client:
         info=upload(client).json();original=info['driveFileId'];copy_id=drive.new_id()
         registry=next(row for row in drive.files.values()if row.get('name')==info['id']+'.json')
         signed=json.loads(registry['content'])['signedRecord']
@@ -292,7 +292,7 @@ def test_first_portable_format_can_recover_its_record_from_trash():
             if drive.files[fid].get('mimeType')=='application/json' or drive.files[fid].get('properties',{}).get('qcp_portable_registry'):
                 del drive.files[fid]
         drive.files[original]['trashed']=True
-    with TestClient(create_app(certificate_storage=drive.storage()))as restarted:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True)))as restarted:
         response=restarted.get(info['verificationUrl'], follow_redirects=False)
         assert response.status_code==303
         assert response.headers['location']==f'https://drive.google.com/file/d/{copy_id}/view'
@@ -319,7 +319,7 @@ def test_md5_is_only_a_locator_when_drive_omits_sha256(damaged):
                     row['md5Checksum']=self.claimed_md5 or hashlib.md5(data,usedforsecurity=False).hexdigest()
             return httpx.Response(200,json=payload)
     drive=NoShaDrive()
-    with TestClient(create_app(certificate_storage=drive.storage()))as client:
+    with TestClient(create_app(certificate_storage=drive.storage(portable=True)))as client:
         info=upload(client).json();original=drive.files.pop(info['driveFileId']);copy_id=drive.new_id()
         drive.files[copy_id]={**original,'id':copy_id,'appProperties':{},'properties':{}}
         if damaged:
