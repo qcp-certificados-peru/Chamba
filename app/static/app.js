@@ -363,7 +363,7 @@ $("certificate-form").addEventListener("submit", async (event) => {
       const started = Date.now();
       const updateProgress = () => {
         const seconds = Math.floor((Date.now() - started) / 1000);
-        $("progress").textContent = `Procesando ${index + 1} de ${batch.length}: ${file.name}${seconds ? ` · ${seconds} s` : ""}${seconds >= 30 ? " · Esperando el resultado; mantén esta pestaña abierta." : ""}`;
+        $("progress").textContent = `Preparando ${index + 1} de ${batch.length}: ${file.name}${seconds ? ` · ${seconds} s` : ""}${seconds >= 30 ? " · En proceso o esperando turno; mantén esta pestaña abierta." : ""}`;
       };
       updateProgress();
       const timer = setInterval(updateProgress, 1000);

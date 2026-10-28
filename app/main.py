@@ -24,6 +24,7 @@ from app.excel import inspect_excel
 from app.storage import DriveStorage, LocalStorage, StorageError, storage_from_environment
 from app.backgrounds import background_choices, require_background_type
 from app.uploads import InspectionCache
+from app.processing import Emissions, ProcessingBusy, MAX_ACTIVE_CERTIFICATES, conversion_workers
 
 STATIC = Path(__file__).parent / "static"
 MAX_PDF_BYTES = 15 * 1024 * 1024
@@ -121,6 +122,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     quota = int(os.environ.get("MAX_STORAGE_MB", "1024")) * 1024 * 1024
     store = certificate_storage or (LocalStorage(storage, quota) if storage_dir else storage_from_environment(storage, quota))
     inspections = InspectionCache()
+    workers = conversion_workers()
 
     async def expire_inspections():
         while True:
@@ -130,8 +132,8 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     @asynccontextmanager
     async def lifespan(app):
         await asyncio.to_thread(store.start)
-        app.state.executor = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
-        app.state.processing = asyncio.Semaphore(1)
+        app.state.executor = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+        app.state.processing = Emissions()
         cleanup = asyncio.create_task(expire_inspections())
         try:
             yield
@@ -139,7 +141,8 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
             cleanup.cancel()
             with suppress(asyncio.CancelledError):
                 await cleanup
-            app.state.executor.shutdown(wait=True, cancel_futures=True)
+            await app.state.processing.close()
+            await asyncio.to_thread(app.state.executor.shutdown, wait=True, cancel_futures=True)
             await asyncio.to_thread(inspections.close)
             await asyncio.to_thread(store.close)
 
@@ -185,6 +188,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
         return {"requiresAccessKey": False, "uploadsEnabled": store.ready,
                 "localMode": is_local and store.backend == "local", "storageBackend": store.backend,
                 "qrMode": store.qr_mode,
+                "maxActiveCertificates": MAX_ACTIVE_CERTIFICATES, "conversionWorkers": workers,
                 "maxPdfMB": 15, "maxExcelMB": 15, "maxSignatureMB": 2, "maxPages": 100,
                 "certificateCodePattern": CODE_PATTERN, "maxCodeLength": MAX_CODE_LENGTH,
                 "inputFormats": ["xlsx", "xlsm", "pdf"], "certificateBackgrounds": background_choices()}
@@ -295,57 +299,59 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
         signature = await read_upload(firma, MAX_SIGNATURE_BYTES) if firma and not pdf_only else None
         certificate_id = str(uuid4())
         inspected = perf_counter()
+
+        async def issue():
+            try:
+                publication = await asyncio.to_thread(store.allocate, certificate_id, origin)
+                verification_url = publication.verification_url
+                allocated = perf_counter()
+                result = await asyncio.get_running_loop().run_in_executor(
+                    app.state.executor, prepare_document, data, source_type, codigoCorrecto, verification_url, signature,
+                    tipoCertificado, codigoFormato, versionFormato)
+                processed = perf_counter()
+                named_code = CODE.search(source_name or "")
+                if named_code and result.final_code and named_code[0].upper() != result.final_code:
+                    result.warnings.append(f"El nombre del archivo dice {named_code[0].upper()}, pero el certificado contiene {result.final_code}. Se conservó el código del documento.")
+                info = {"id": certificate_id, "filename": filename, "sourceType": source_type,
+                        "createdAt": datetime.now(timezone.utc).isoformat(),
+                        "detectedCodes": result.detected_codes, "finalCode": result.final_code,
+                        "replacements": result.replacements, "warnings": result.warnings,
+                        "stampPages": result.stamp_pages, "signatureIncluded": result.signature_included,
+                        "sha256": hashlib.sha256(result.data).hexdigest(),
+                        "verificationUrl": verification_url,
+                        "downloadUrl": f"/api/certificates/{certificate_id}/download"}
+                if publication.public_key:
+                    info["downloadUrl"] += f"?key={publication.public_key}"
+                if source_type == "xlsx" or pdf_only:
+                    info.update(certificateType=result.certificate_type, backgroundVerified=bool(result.background_pages),
+                                backgroundPages=result.background_pages, formatPreserved=result.format_preserved,
+                                sheetName=result.sheet_name, formatFooterVerified=result.format_footer_verified)
+                await asyncio.to_thread(store.save, certificate_id, result.data, info, publication)
+                if pruebaCopia:
+                    info, proof = await asyncio.to_thread(store.exercise_fresh_test_copy, info)
+                    info["copyTest"] = proof
+                if pruebaMovimiento:
+                    info["moveTest"] = await asyncio.to_thread(store.exercise_fresh_test_move, info)
+                if excelToken:
+                    await asyncio.to_thread(inspections.discard, excelToken)
+                saved = perf_counter()
+                stages = (("inspect", inspected - started), ("allocate", allocated - inspected),
+                          ("process", processed - allocated), ("save", saved - processed))
+                response.headers["Server-Timing"] = ", ".join(f"{name};dur={duration * 1000:.1f}" for name, duration in stages)
+            except StorageError:
+                raise
+            except CertificateError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            except Exception as exc:
+                logger.exception("Error al procesar un certificado")
+                raise HTTPException(500, "No se pudo procesar el certificado. Revisa el archivo o contacta al administrador.") from exc
+            return info
+
         try:
-            await asyncio.wait_for(app.state.processing.acquire(), timeout=0.1)
-        except TimeoutError:
-            raise HTTPException(429, "El portal está procesando otros archivos. Inténtalo nuevamente en unos segundos.")
-        try:
-            publication = await asyncio.to_thread(store.allocate, certificate_id, origin)
-            verification_url = publication.verification_url
-            allocated = perf_counter()
-            result = await asyncio.get_running_loop().run_in_executor(
-                app.state.executor, prepare_document, data, source_type, codigoCorrecto, verification_url, signature,
-                tipoCertificado, codigoFormato, versionFormato)
-            processed = perf_counter()
-            named_code = CODE.search(source_name or "")
-            if named_code and result.final_code and named_code[0].upper() != result.final_code:
-                result.warnings.append(f"El nombre del archivo dice {named_code[0].upper()}, pero el certificado contiene {result.final_code}. Se conservó el código del documento.")
-            info = {"id": certificate_id, "filename": filename, "sourceType": source_type,
-                    "createdAt": datetime.now(timezone.utc).isoformat(),
-                    "detectedCodes": result.detected_codes, "finalCode": result.final_code,
-                    "replacements": result.replacements, "warnings": result.warnings,
-                    "stampPages": result.stamp_pages, "signatureIncluded": result.signature_included,
-                    "sha256": hashlib.sha256(result.data).hexdigest(),
-                    "verificationUrl": verification_url,
-                    "downloadUrl": f"/api/certificates/{certificate_id}/download"}
-            if publication.public_key:
-                info["downloadUrl"] += f"?key={publication.public_key}"
-            if source_type == "xlsx" or pdf_only:
-                info.update(certificateType=result.certificate_type, backgroundVerified=bool(result.background_pages),
-                            backgroundPages=result.background_pages, formatPreserved=result.format_preserved,
-                            sheetName=result.sheet_name, formatFooterVerified=result.format_footer_verified)
-            await asyncio.to_thread(store.save, certificate_id, result.data, info, publication)
-            if pruebaCopia:
-                info, proof = await asyncio.to_thread(store.exercise_fresh_test_copy, info)
-                info["copyTest"] = proof
-            if pruebaMovimiento:
-                info["moveTest"] = await asyncio.to_thread(store.exercise_fresh_test_move, info)
-            if excelToken:
-                await asyncio.to_thread(inspections.discard, excelToken)
-            saved = perf_counter()
-            stages = (("inspect", inspected - started), ("allocate", allocated - inspected),
-                      ("process", processed - allocated), ("save", saved - processed))
-            response.headers["Server-Timing"] = ", ".join(f"{name};dur={duration * 1000:.1f}" for name, duration in stages)
-        except StorageError:
-            raise
-        except CertificateError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        except Exception as exc:
-            logger.exception("Error al procesar un certificado")
-            raise HTTPException(500, "No se pudo procesar el certificado. Revisa el archivo o contacta al administrador.") from exc
-        finally:
-            app.state.processing.release()
-        return info
+            return await app.state.processing.run(issue)
+        except ProcessingBusy:
+            raise HTTPException(429, "Ya hay tres archivos en preparación. Espera a que termine uno e inténtalo de nuevo.",
+                                headers={"Retry-After": "5"}) from None
 
     @app.post("/api/excel/inspect")
     async def inspect_workbook(excel: UploadFile = File(...)):
