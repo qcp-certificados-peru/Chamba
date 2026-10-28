@@ -37,6 +37,7 @@ class FakeDrive:
         self.fail_token = False
         self.fail_network = False
         self.queries = []
+        self.writes = []
 
     def new_id(self):
         self.counter += 1
@@ -62,20 +63,32 @@ class FakeDrive:
         if self.fail_network:
             raise httpx.ConnectError("synthetic-secret", request=request)
         path = request.url.path
+        if request.method != "GET":
+            self.writes.append((request.method, path))
         if path.endswith("/files/generateIds"):
             return httpx.Response(200, json={"ids": [self.new_id()]})
         if path == "/drive/v3/files" and request.method == "GET":
             query = request.url.params["q"]
             self.queries.append(query)
-            parent = re.search(r"'([^']+)' in parents", query)[1]
+            parent = re.search(r"'([^']+)' in parents", query)
             identifier = re.search(r"value='([^']+)'", query)
-            rows = [row for row in self.files.values() if parent in row.get("parents", [])]
+            rows = [row for row in self.files.values()
+                    if not row.get("trashed") and (not parent or parent[1] in row.get("parents", []))]
+            for mime in ("application/pdf", "application/vnd.google-apps.folder", "application/json"):
+                if f"mimeType = '{mime}'" in query:
+                    rows = [row for row in rows if row.get("mimeType") == mime]
             if identifier:
                 rows = [row for row in rows if row.get("appProperties", {}).get("qcp_certificate_id") == identifier[1]]
             else:
                 assert "name = 'metadata.json'" in query
                 rows = [row for row in rows if row.get("name") == "metadata.json"]
-            return httpx.Response(200, json={"files": [{"id": row["id"]} for row in rows]})
+            offset = int(request.url.params.get("pageToken", "0"))
+            result = {"files": [
+                {key: value for key, value in row.items() if key in {"id", "name", "mimeType", "appProperties"}}
+                for row in rows[offset:offset + 100]]}
+            if len(rows) > offset + 100:
+                result["nextPageToken"] = str(offset + 100)
+            return httpx.Response(200, json=result)
         if path == "/drive/v3/files" and request.method == "POST":
             row = json.loads(request.content)
             row["id"] = self.new_id()
@@ -87,9 +100,14 @@ class FakeDrive:
                 f"Content-Type: {request.headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n".encode() + request.content)
             meta_part, content_part = list(message.iter_parts())
             row = json.loads(meta_part.get_payload(decode=True))
-            if self.fail_metadata and row["name"] == "metadata.json":
+            if self.fail_metadata and (row["name"] == "metadata.json" or row.get("appProperties")):
                 return httpx.Response(403, json={"error": "storageQuotaExceeded"})
             row.setdefault("id", self.new_id())
+            if row["id"] in self.files:
+                return httpx.Response(409, json={"error": "fileAlreadyExists"})
+            properties = row.get("appProperties", {})
+            assert len(properties) <= 30
+            assert all(len(key.encode()) + len(value.encode()) <= 124 for key, value in properties.items())
             row["content"] = content_part.get_payload(decode=True)
             self.files[row["id"]] = row
             return httpx.Response(200, json={"id": row["id"]})
@@ -157,7 +175,9 @@ def test_drive_excel_survives_loss_of_local_storage_and_domain_change(tmp_path, 
                     decoded.append(barcode.text)
             assert info["verificationUrl"] in decoded
         assert not ephemeral.exists()
-        # Named folder access remains private; only the final PDF receives a public permission.
+        # One named PDF in the configured folder; no new folder or JSON sidecar.
+        assert set(drive.files) == {ROOT, info["driveFileId"]}
+        assert drive.files[info["driveFileId"]]["parents"] == [ROOT]
         assert drive.permissions == [(info["driveFileId"], {"type": "anyone", "role": "reader", "allowFileDiscovery": False})]
         assert drive.token_requests == 1
     # New process, empty local directory, different portal origin: Drive is sufficient.
@@ -167,7 +187,7 @@ def test_drive_excel_survives_loss_of_local_storage_and_domain_change(tmp_path, 
         assert restarted.get(info["downloadUrl"]).content == pdf
         assert "filename*=utf-8''Certificado%20ficticio%20PER%C3%9A.pdf" in restarted.get(info["downloadUrl"]).headers["content-disposition"]
     assert drive.token_requests == 2
-    assert all(" in parents and trashed = false" in query for query in drive.queries)
+    assert any(query.startswith("trashed = false") for query in drive.queries)
 
 
 def test_same_filename_creates_distinct_drive_links():

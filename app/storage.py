@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from app.drive_records import decode_record, encode_record, original_file
+
 logger = logging.getLogger(__name__)
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3"
@@ -171,17 +173,38 @@ class DriveStorage:
                                                    for row in permissions.get("permissions", [])):
             raise StorageError("Usa una carpeta de Drive restringida a personas concretas; solo se publicará cada PDF final.")
 
-    def _list(self, parent: str, extra: str) -> list[dict]:
-        result = self._json(self._request("GET", "/files", params={
-            "q": f"'{parent}' in parents and trashed = false and ({extra})",
-            "fields": "files(id,name,mimeType),nextPageToken", "pageSize": 100,
-            "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}))
-        if result.get("nextPageToken"):
-            raise StorageError("Hay registros duplicados o inesperados en la carpeta de Drive.")
-        rows = result.get("files", [])
-        if not isinstance(rows, list) or any(not isinstance(row, dict) or not FILE_ID.fullmatch(str(row.get("id", ""))) for row in rows):
-            raise StorageError("Google Drive devolvió un listado no válido.")
-        return rows
+    def _list(self, parent: str | None, extra: str) -> list[dict]:
+        location = f"'{parent}' in parents and " if parent else ""
+        params = {
+            "q": f"{location}trashed = false and ({extra})",
+            "fields": "files(id,name,mimeType,appProperties),nextPageToken,incompleteSearch", "pageSize": 100,
+            "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
+        rows, tokens = [], set()
+        while True:
+            result = self._json(self._request("GET", "/files", params=params))
+            if result.get("incompleteSearch"):
+                raise StorageError("Google Drive no pudo completar la búsqueda del certificado. Inténtalo de nuevo.")
+            page = result.get("files", [])
+            if not isinstance(page, list) or any(not isinstance(row, dict) or not FILE_ID.fullmatch(str(row.get("id", ""))) for row in page):
+                raise StorageError("Google Drive devolvió un listado no válido.")
+            rows.extend(page)
+            token = result.get("nextPageToken")
+            if len(rows) > 1000 or (token and (not isinstance(token, str) or token in tokens)):
+                raise StorageError("Hay demasiados registros o copias para este certificado en Drive.")
+            if not token:
+                return rows
+            tokens.add(token)
+            params["pageToken"] = token
+
+    def _record_pdf(self, certificate_id: str) -> dict | None:
+        identifier = str(UUID(certificate_id))
+        # Search by immutable publication ID, irrespective of its current folder.
+        rows = self._list(None, "mimeType = 'application/pdf' and "
+                          f"appProperties has {{ key='qcp_certificate_id' and value='{identifier}' }}")
+        issued = [row for row in rows if original_file(row.get("appProperties", {}), row["id"])]
+        if len(issued) > 1:
+            raise StorageError("Hay registros duplicados para este certificado. Contacta al administrador.")
+        return issued[0] if issued else None
 
     def _record_folder(self, certificate_id: str) -> str:
         identifier = str(UUID(certificate_id))
@@ -224,35 +247,46 @@ class DriveStorage:
         with self.write_lock:
             existing = self._list(self.folder_id, "mimeType = 'application/vnd.google-apps.folder' and "
                                  f"appProperties has {{ key='qcp_certificate_id' and value='{identifier}' }}")
-            if existing:
+            if existing or self._record_pdf(identifier):
                 raise StorageError("El certificado ya existe; se conservó el registro anterior.", 409)
-            folder = self._json(self._request("POST", "/files", params={"supportsAllDrives": "true", "fields": "id"}, json={
-                "name": f"{metadata['filename'][:-4]} · {identifier[:8]}",
-                "mimeType": "application/vnd.google-apps.folder", "parents": [self.folder_id],
-                "appProperties": {"qcp_certificate_id": identifier},
-            }))
-            record_folder = self._id(folder.get("id"))
+            if metadata.get("id") != identifier:
+                raise StorageError("El registro no corresponde a la emisión solicitada.", 422)
+            info = {**metadata, "storageBackend": "drive", "driveFileId": file_id,
+                    "driveUrl": f"https://drive.google.com/file/d/{file_id}/view"}
+            try:
+                properties = encode_record(info)
+            except ValueError as error:
+                raise StorageError(str(error), 422) from None
+            created = False
             try:
                 actual_id = self._upload({"id": file_id, "name": metadata["filename"], "mimeType": "application/pdf",
-                                         "parents": [record_folder]}, pdf, "application/pdf")
+                                         "parents": [self.folder_id], "appProperties": properties}, pdf, "application/pdf")
                 if actual_id != file_id:
                     raise StorageError("Google Drive no conservó el enlace reservado del certificado.")
-                # Only the final PDF is public. Folders and JSON records stay private.
+                created = True
+                # Publish only the newly created PDF; properties stay app-private.
                 self._request("POST", f"/files/{file_id}/permissions", params={"supportsAllDrives": "true"},
                               json={"type": "anyone", "role": "reader", "allowFileDiscovery": False})
-                metadata["storageBackend"] = "drive"
-                metadata["driveFileId"] = file_id
-                metadata["driveUrl"] = f"https://drive.google.com/file/d/{file_id}/view"
-                self._upload({"name": "metadata.json", "mimeType": "application/json", "parents": [record_folder]},
-                             json.dumps(metadata, ensure_ascii=False).encode(), "application/json")
+                metadata.update(info)
             except Exception:
-                try:
-                    self._request("DELETE", f"/files/{record_folder}", params={"supportsAllDrives": "true"})
-                except StorageError:
-                    logger.warning("No se pudo limpiar un registro de publicación incompleta en Drive.")
+                if created:
+                    try:
+                        self._request("DELETE", f"/files/{file_id}", params={"supportsAllDrives": "true"})
+                    except StorageError:
+                        logger.warning("No se pudo limpiar el PDF de una publicación incompleta en Drive.")
                 raise
 
     def metadata(self, certificate_id: str) -> dict:
+        record = self._record_pdf(certificate_id)
+        if record:
+            try:
+                info = decode_record(record["appProperties"])
+            except ValueError as error:
+                raise StorageError(str(error)) from None
+            if info.get("driveFileId") != record["id"]:
+                raise StorageError("El registro no corresponde al PDF emitido.")
+            return self._validate_metadata(info, certificate_id)
+        # Read legacy folders/JSON exactly as issued. Never migrate or edit them.
         folder = self._record_folder(certificate_id)
         records = self._list(folder, "name = 'metadata.json' and mimeType = 'application/json'")
         if len(records) != 1:
@@ -260,7 +294,9 @@ class DriveStorage:
         response = self._request("GET", f"/files/{self._id(records[0]['id'])}", params={"alt": "media"})
         if len(response.content) > 64 * 1024:
             raise StorageError("El registro del certificado supera el tamaño permitido.")
-        info = self._json(response)
+        return self._validate_metadata(self._json(response), certificate_id)
+
+    def _validate_metadata(self, info: dict, certificate_id: str) -> dict:
         if (info.get("id") != str(UUID(certificate_id))
                 or not isinstance(info.get("driveFileId"), str) or not FILE_ID.fullmatch(info["driveFileId"])
                 or not isinstance(info.get("filename"), str) or not re.fullmatch(r"[a-f0-9]{64}", str(info.get("sha256", "")))):

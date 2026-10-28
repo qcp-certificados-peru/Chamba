@@ -15,7 +15,7 @@
     <article class="panel legal-content">
       <span class="eyebrow">PORTAL QCP</span>
       <h1>Política de privacidad</h1>
-      <p class="legal-date">Actualizada el 21 de octubre de 2026.</p>
+      <p class="legal-date">Actualizada el 28 de octubre de 2026.</p>
       <p>Portal QCP convierte archivos Excel o PDF en certificados PDF con una imagen de firma y un QR de consulta. Esta política describe el uso de los documentos cargados y de la autorización de Google Drive.</p>
 
       <h2>Datos utilizados y finalidad</h2>
@@ -23,17 +23,17 @@
       <p>Se registra el nombre del PDF, su identificador, fecha de emisión en el portal, códigos detectados, cambios realizados, presencia de firma y una huella SHA-256 que permite comprobar si la copia almacenada coincide con el registro. El portal no solicita contraseñas de Google a los trabajadores.</p>
 
       <h2>Acceso a Google Drive</h2>
-      <p>La persona que administra el almacenamiento autoriza su cuenta mediante el consentimiento de Google. El permiso de Drive solicitado es amplio; la aplicación utiliza una carpeta configurada para crear los PDFs finales y sus registros, consultar esos registros y descargar los certificados.</p>
+      <p>La persona que administra el almacenamiento autoriza su cuenta mediante el consentimiento de Google. El permiso de Drive solicitado es amplio; la aplicación utiliza una carpeta configurada para crear los PDFs finales y sus registros. Consulta los certificados emitidos por el portal mediante su identificador, incluso si el responsable los mueve a otra carpeta de la misma cuenta, y permite descargarlos.</p>
       <p>Las credenciales de autorización se configuran en el servidor. No se incorporan en los PDFs, QR ni registros de certificados. El acceso a los datos de Google se utiliza para las funciones descritas en esta política, sin venta de esos datos, publicidad ni entrenamiento de modelos. La aplicación no utiliza Gmail, Google Fotos ni una agenda de contactos.</p>
       <p>El uso de información recibida mediante las APIs de Google debe respetar la <a href="https://developers.google.com/terms/api-services-user-data-policy" rel="noopener noreferrer">Política de Datos de Usuario de los Servicios de API de Google</a>, incluidos sus requisitos de uso limitado.</p>
 
       <h2>Procesamiento y almacenamiento</h2>
-      <p>El servicio se ejecuta en Render. Los archivos fuente y la firma se procesan para generar el resultado; no se guardan como archivos independientes en Drive. Cuando Drive está conectado, se conserva el PDF final y un registro por emisión en la carpeta seleccionada por el administrador.</p>
+      <p>El servicio se ejecuta en Render. Los archivos fuente y la firma se procesan para generar el resultado; no se guardan como archivos independientes en Drive. Las emisiones nuevas guardan el PDF directamente en la carpeta seleccionada por el administrador y conservan su registro en propiedades privadas de Drive asociadas al archivo, sin crear carpetas ni archivos JSON por emisión. Los registros anteriores se conservan y siguen consultándose en su estructura original.</p>
       <p>Para evitar enviar dos veces el mismo Excel, la revisión inicial puede mantener una copia temporal privada en el servidor. Esa copia caduca a los 15 minutos y se elimina al completar la emisión, al liberar espacio o al reiniciar el servicio. Las copias caducadas se limpian cada minuto. No se publican ni se envían a Drive.</p>
       <p>En la fase de pruebas, el administrador puede utilizar una cuenta personal con documentos ficticios. Para emitir documentos reales debe configurar el almacenamiento administrado por la empresa. Cambiar de cuenta o carpeta afecta a las nuevas emisiones y no traslada automáticamente las anteriores.</p>
 
       <h2>Quién puede consultar los certificados</h2>
-      <p>Cada PDF final se comparte como «cualquiera con el enlace». Una persona que reciba el QR o el enlace puede leer y descargar ese PDF sin iniciar sesión. La aplicación no publica la carpeta completa ni el archivo de registro mediante ese permiso.</p>
+      <p>Cada PDF final se comparte como «cualquiera con el enlace». Una persona que reciba el QR o el enlace puede leer y descargar ese PDF sin iniciar sesión. La aplicación no publica la carpeta completa, las propiedades privadas ni los archivos de registro anteriores mediante ese permiso.</p>
       <p>Las personas con permisos sobre la carpeta de Drive pueden acceder a sus archivos según esos permisos. La página de consulta del portal muestra los datos del registro a quien tenga su enlace: nombre de archivo, código, fecha, presencia de firma y huella del PDF. Por eso, solo deben cargarse documentos autorizados para esta forma de consulta.</p>
 
       <h2>Conservación y retirada</h2>
