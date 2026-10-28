@@ -130,6 +130,12 @@ Referencias oficiales: [OAuth para aplicaciones de servidor](https://developers.
 
 ## Prueba automática de movimiento y QR directo
 
+Para diagnosticar rechazos sin emitir ni cambiar archivos, consulta `GET /api/storage/check`: comprueba acceso a la carpeta, permiso para guardar y la cuota que Google informa para la cuenta conectada. Devuelve únicamente estado y códigos seguros; no incluye nombres, correos, identificadores de carpetas, cantidades de almacenamiento ni credenciales. El resultado, incluidos los errores, se conserva 30 segundos para evitar consultas repetidas. Una cuota no informada se devuelve como `not_reported`; la comprobación de lectura no demuestra que una política permita compartir públicamente.
+
+Durante una emisión se reintentan únicamente rechazos explícitos `rateLimitExceeded`, `userRateLimitExceeded`, `sharingRateLimitExceeded` o HTTP 429, con dos reintentos y espera creciente. Se respeta `Retry-After`; si supera cinco segundos no se reintenta dentro de esa solicitud. No se repiten automáticamente escrituras con fallos de red o HTTP 5xx, porque Google podría haberlas aceptado. Un HTTP 401 permite una renovación de acceso y un único reenvío. Los rechazos de permisos, políticas, cuota diaria y almacenamiento se explican por separado (`DRIVE_PERMISSION_DENIED`, `DRIVE_POLICY`, `DRIVE_DAILY_LIMIT`, `DRIVE_STORAGE_FULL`). No se muestran mensajes originales de Google que puedan incluir datos privados. Los registros solo incluyen operación abstracta, estado HTTP y motivos conocidos.
+
+Hasta tres trabajadores pueden enviar archivos; la reserva, conversión y publicación de cada emisión en la cuenta empresarial se atienden de una en una. No se superponen los flujos de Drive de distintos trabajadores. La causa de un rechazo histórico no se puede determinar a partir del aviso genérico anterior; no se debe interpretar cualquier HTTP 403 como falta de permisos.
+
 ```sh
 .venv/bin/python scripts/check_direct_drive_qr.py --url https://tu-portal.example.com
 ```

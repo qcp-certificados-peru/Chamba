@@ -265,7 +265,7 @@ def test_drive_failure_never_returns_success_or_saves_locally(tmp_path, monkeypa
     monkeypatch.setenv("CERTIFICATE_STORAGE_DIR", str(tmp_path / "should_not_exist"))
     with TestClient(create_app(certificate_storage=drive.storage())) as client:
         response = upload(client)
-        assert response.status_code == 503
+        assert response.status_code == (507 if failure == "fail_metadata" else 503)
         assert "synthetic-secret" not in response.text
         assert "synthetic-refresh" not in response.text
     assert list(drive.files) == [ROOT]
