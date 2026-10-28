@@ -262,7 +262,8 @@ class DriveStorage:
                     "driveUrl": f"https://drive.google.com/file/d/{file_id}/view"}
             if publication.public_key:
                 info.update(qrMode=MODE, qrPublicKey=publication.public_key, issuedDriveFileId=file_id,
-                            pdfMd5=hashlib.md5(pdf, usedforsecurity=False).hexdigest())
+                            pdfMd5=hashlib.md5(pdf, usedforsecurity=False).hexdigest(),
+                            copyViewerAccess="anyone-reader")
             try:
                 properties = encode_record(info)
                 public_properties = signed_record(info, publication.signing_key) if publication.public_key else None
@@ -575,6 +576,40 @@ class DriveStorage:
                               "customPropertiesRemoved":not bool(row.get('appProperties')or row.get('properties'))}
         except (StorageError, ValueError) as error:
             return info, {"ok": False, "originalDeleted": deleted, "detail": str(error)}
+
+    def viewer_url(self, certificate_id: str, public_key: str) -> str:
+        info = self.portable_metadata(certificate_id, public_key)
+        file_id = self._id(info.get("driveFileId"))
+        # New publications explicitly retain public reader access on an intact
+        # copy, just as on the issued original. Older records without that signed
+        # policy keep their existing permissions. Never share a folder or a file
+        # merely because its name matches.
+        if (info.get("copyViewerAccess") == "anyone-reader"
+                and file_id != info.get("issuedDriveFileId")):
+            with self.write_lock:
+                if not self._public_reader(file_id):
+                    self._request("POST", f"/files/{file_id}/permissions", params={"supportsAllDrives": "true"},
+                                  json={"type": "anyone", "role": "reader", "allowFileDiscovery": False})
+        # Build the destination from the checked ID, never from caller input or
+        # a stored URL. The browser opens Drive without OAuth credentials.
+        return f"https://drive.google.com/file/d/{file_id}/view"
+
+    def _public_reader(self, file_id: str) -> bool:
+        params = {"fields": "permissions(type,role),nextPageToken", "pageSize": 100,
+                  "supportsAllDrives": "true"}
+        tokens = set()
+        while True:
+            result = self._json(self._request("GET", f"/files/{file_id}/permissions", params=params))
+            if any(p.get("type") == "anyone" and p.get("role") in {"reader", "commenter", "writer"}
+                   for p in result.get("permissions", [])):
+                return True
+            token = result.get("nextPageToken")
+            if not token:
+                return False
+            if not isinstance(token, str) or token in tokens or len(tokens) >= 100:
+                raise StorageError("No se pudieron comprobar los permisos de lectura de la copia.")
+            tokens.add(token)
+            params["pageToken"] = token
 
     def download(self, metadata: dict) -> bytes:
         file_id = self._id(metadata.get("driveFileId"))

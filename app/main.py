@@ -14,7 +14,7 @@ from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -164,7 +164,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
             "default-src 'self'; img-src 'self' data: blob:; script-src 'self'; "
             "style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         )
-        if request.url.path.startswith("/api/"):
+        if request.url.path.startswith(("/api/", "/q/")):
             response.headers["Cache-Control"] = "no-store"
         elif request.url.path.startswith("/static/") or response.headers.get("content-type", "").startswith("text/html"):
             response.headers.setdefault("Cache-Control", "no-cache")
@@ -227,18 +227,12 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     async def portable_certificate(certificate_id: UUID, public_key: str):
         if not isinstance(store, DriveStorage):
             raise HTTPException(404, "Este QR requiere el almacenamiento de Drive.")
-        for attempt in range(2):
-            info = await asyncio.to_thread(store.portable_metadata, str(certificate_id), public_key)
-            try:
-                pdf = await asyncio.to_thread(store.download, info)
-            except StorageError as error:
-                # The original can disappear between discovery and download.
-                # Resolve once more, still requiring the same key and PDF hash.
-                if attempt or error.status not in {404, 409}:
-                    raise
-                continue
-            return Response(pdf, media_type="application/pdf", headers={"Cache-Control": "no-store",
-                "Content-Disposition": f"inline; filename*=utf-8''{quote(info['filename'])}"})
+        # Resolution already checks the signed record and the current PDF's
+        # SHA-256 (downloading only when Drive omits its checksum). Do not
+        # download the PDF again or render a portal page just to open Drive.
+        url = await asyncio.to_thread(store.viewer_url, str(certificate_id), public_key)
+        return RedirectResponse(url, status_code=303,
+                                headers={"Cache-Control": "no-store"})
 
     @app.post("/api/certificates", status_code=201)
     async def create_certificate(response: Response, excel: UploadFile | None = File(None), pdf: UploadFile | None = File(None), codigoCorrecto: str = Form(""),

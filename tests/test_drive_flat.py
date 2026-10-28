@@ -88,7 +88,10 @@ def test_signed_drive_copy_serves_same_pdf_after_original_is_deleted():
         del drive.files[original_id]
         selected = client.get(f"/api/certificates/{info['id']}").json()
         assert selected['driveFileId'] == copied_id and selected['issuedDriveFileId'] == original_id
-        assert client.get(info['verificationUrl']).content == drive.files[copied_id]['content']
+        qr = client.get(info['verificationUrl'], follow_redirects=False)
+        assert qr.status_code == 303
+        assert qr.headers['location'] == f'https://drive.google.com/file/d/{copied_id}/view'
+        assert client.get(info['downloadUrl']).content == drive.files[copied_id]['content']
 
 
 def test_original_record_is_found_after_more_than_one_page_of_copies():
