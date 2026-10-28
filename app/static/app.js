@@ -7,6 +7,9 @@ const codes = new Map();
 const certificateTypes = new Map();
 const layouts = new Map();
 const formatFooters = new Map();
+const batchLinks = new Map();
+let batchPositions = new WeakMap();
+let nextBatchPosition = 0;
 let inspectionQueue = Promise.resolve();
 let backgrounds = [];
 let certificateCodePattern = "";
@@ -210,6 +213,30 @@ for (const eventName of ["dragleave", "drop"]) {
 }
 dropzone.addEventListener("drop", (event) => addFiles(event.dataTransfer.files));
 
+function updateBatchExport() {
+  if (!$("batch-export")) return;
+  $("batch-export").hidden = batchLinks.size === 0;
+  $("download-links").disabled = busy || batchLinks.size === 0;
+  $("batch-export-summary").textContent = `${batchLinks.size} ${batchLinks.size === 1 ? "PDF con enlace de Drive" : "PDF con enlaces de Drive"}. Solo incluye documentos preparados correctamente.`;
+}
+
+$("download-links")?.addEventListener("click", () => {
+  if (busy || !batchLinks.size) return;
+  try {
+    const rows = [...batchLinks].sort(([a], [b]) => a - b).map(([, row]) => row);
+    const url = URL.createObjectURL(window.QCPLinksExcel.create(rows));
+    const download = document.createElement("a");
+    download.href = url;
+    download.download = "Enlaces_certificados.xlsx";
+    document.body.append(download);
+    download.click();
+    download.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch {
+    message("No se pudo generar el Excel de enlaces. Vuelve a pulsar Descargar Excel de enlaces.");
+  }
+});
+
 function addResult(file, result, error) {
   const card = document.createElement("article");
   card.className = `result-card${error ? " failed" : ""}`;
@@ -312,9 +339,21 @@ $("certificate-form").addEventListener("submit", async (event) => {
   $("document-files").disabled = true;
   $("signature").disabled = true;
   $("submit").textContent = "Preparando…";
-  $("result-list").replaceChildren();
-  $("drive-file-help").hidden = true;
-  $("portable-file-help").hidden = true;
+  const continuingBatch = files.some((file) => batchPositions.has(file));
+  if (continuingBatch) {
+    $("result-list").querySelectorAll(".failed").forEach((card) => card.remove());
+  } else {
+    batchLinks.clear();
+    batchPositions = new WeakMap();
+    nextBatchPosition = 0;
+    $("result-list").replaceChildren();
+    $("drive-file-help").hidden = true;
+    $("portable-file-help").hidden = true;
+  }
+  for (const file of files) {
+    if (!batchPositions.has(file)) batchPositions.set(file, nextBatchPosition++);
+  }
+  updateBatchExport();
   $("results").hidden = false;
   const failed = [];
   const batch = [...files];
@@ -353,6 +392,9 @@ $("certificate-form").addEventListener("submit", async (event) => {
         const result = await response.json();
         if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "La carga no es válida.");
         addResult(file, result, null);
+        if (result.filename && window.QCPLinksExcel?.isDriveLink(result.driveUrl)) {
+          batchLinks.set(batchPositions.get(file), { filename: result.filename, driveUrl: result.driveUrl });
+        }
         codes.delete(file);
         certificateTypes.delete(file);
         layouts.delete(file);
@@ -368,6 +410,8 @@ $("certificate-form").addEventListener("submit", async (event) => {
   } finally {
     files = failed;
     busy = false;
+    if (!failed.length) batchPositions = new WeakMap();
+    updateBatchExport();
     $("document-files").disabled = false;
     $("signature").disabled = false;
     const arrow = document.createElement("span");

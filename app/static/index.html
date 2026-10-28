@@ -7,6 +7,7 @@
   <title>Quality Control Perú · Portal de certificados</title>
   <link rel="icon" href="/static/qcp-emblem.png" type="image/png">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/links-excel.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body class="portal-home">
@@ -78,6 +79,10 @@
         </form>
         <section id="results" class="results" aria-label="Resultados" hidden>
           <div class="results-heading"><h3>Certificados del lote</h3><span>Descarga y comparte</span></div>
+          <div id="batch-export" class="batch-export" hidden>
+            <button id="download-links" class="export-button" type="button">Descargar Excel de enlaces ↓</button>
+            <p id="batch-export-summary" role="status"></p>
+          </div>
           <div id="result-list"></div>
           <div id="portable-file-help" class="drive-file-help" hidden>
             <h4>El QR abre el visor de Google Drive</h4>
