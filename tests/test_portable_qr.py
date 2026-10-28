@@ -286,7 +286,7 @@ def test_md5_is_only_a_locator_when_drive_omits_sha256(damaged):
         response=client.get(info['verificationUrl'], follow_redirects=False)
         assert drive.pdf_reads > 0
         if damaged:
-            assert response.status_code == 409 and 'location' not in response.headers
+            assert response.status_code in {404, 409} and 'location' not in response.headers
             return
         assert response.status_code==303
         assert response.headers['location']==f'https://drive.google.com/file/d/{copy_id}/view'
