@@ -5,6 +5,7 @@ import hashlib
 from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 
 from app.drive_records import encode_record
@@ -167,3 +168,23 @@ def test_publication_id_cannot_be_reissued_after_only_a_copy_remains():
         store.save(info['id'],row['content'],info,Publication(info['verificationUrl'],drive.new_id()))
     assert error.value.status==409 and drive.files==before
     store.close()
+
+
+def test_copy_is_used_if_original_disappears_during_qr_download():
+    class ConcurrentDeleteDrive(FakeDrive):
+        delete_on_download = None
+        def handle(self, request):
+            if (self.delete_on_download and request.url.path.endswith('/'+self.delete_on_download)
+                    and request.url.params.get('alt')=='media'):
+                del self.files[self.delete_on_download]
+                self.delete_on_download=None
+                return httpx.Response(404)
+            return super().handle(request)
+    drive=ConcurrentDeleteDrive()
+    with TestClient(create_app(certificate_storage=drive.storage()))as client:
+        info=upload(client).json();original=info['driveFileId'];copy_id=drive.new_id()
+        drive.files[copy_id]={**deepcopy(drive.files[original]),'id':copy_id,'appProperties':{}}
+        expected=drive.files[original]['content'];drive.delete_on_download=original
+        response=client.get(info['verificationUrl'])
+        assert response.status_code==200 and response.content==expected
+        assert original not in drive.files
