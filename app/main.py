@@ -122,7 +122,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     quota = int(os.environ.get("MAX_STORAGE_MB", "1024")) * 1024 * 1024
     store = certificate_storage or (LocalStorage(storage, quota) if storage_dir else storage_from_environment(storage, quota))
     inspections = InspectionCache()
-    workers = conversion_workers()
+    workers = 1 if isinstance(store, DriveStorage) else conversion_workers()
 
     async def expire_inspections():
         while True:
@@ -134,6 +134,9 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
         await asyncio.to_thread(store.start)
         app.state.executor = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
         app.state.processing = Emissions()
+        app.state.drive_emission = asyncio.Semaphore(1)
+        app.state.storage_check_lock = asyncio.Lock()
+        app.state.storage_check_cache = None
         cleanup = asyncio.create_task(expire_inspections())
         try:
             yield
@@ -152,9 +155,19 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
     pages = {name: versioned_html(STATIC / name)
              for name in ("index.html", "privacy.html", "terms.html", "verify.html")}
 
+    def storage_failure(error):
+        body = {"detail": str(error)}
+        if error.code:
+            body["detail"] += f" Código: {error.code}."
+            body["storageError"] = {"code": error.code, "reason": error.reason,
+                                    "operation": error.operation, "upstreamStatus": error.upstream_status}
+        headers = {"Retry-After": str(error.retry_seconds)} if error.retry_seconds is not None else {}
+        return body, error.status, headers
+
     @app.exception_handler(StorageError)
     async def storage_error(request, error):
-        return JSONResponse({"detail": str(error)}, status_code=error.status)
+        body, status, headers = storage_failure(error)
+        return JSONResponse(body, status_code=status, headers=headers)
 
     @app.middleware("http")
     async def security_headers(request, call_next):
@@ -192,6 +205,24 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
                 "maxPdfMB": 15, "maxExcelMB": 15, "maxSignatureMB": 2, "maxPages": 100,
                 "certificateCodePattern": CODE_PATTERN, "maxCodeLength": MAX_CODE_LENGTH,
                 "inputFormats": ["xlsx", "xlsm", "pdf"], "certificateBackgrounds": background_choices()}
+
+    @app.get("/api/storage/check")
+    async def check_storage():
+        if not isinstance(store, DriveStorage):
+            return {"backend": "local", "status": "ok"}
+        # The public diagnostic returns only status and allowlisted error codes.
+        # Cache successes and failures to avoid generating a new burst of API
+        # calls when several people check the same incident.
+        async with app.state.storage_check_lock:
+            cached = app.state.storage_check_cache
+            if cached is None or perf_counter() - cached[0] >= 30:
+                try:
+                    body, status, headers = await asyncio.to_thread(store.check), 200, {}
+                except StorageError as error:
+                    body, status, headers = storage_failure(error)
+                cached = (perf_counter(), body, status, headers)
+                app.state.storage_check_cache = cached
+            return JSONResponse(cached[1], status_code=cached[2], headers=cached[3])
 
     @app.get("/")
     async def home():
@@ -347,8 +378,17 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
                 raise HTTPException(500, "No se pudo procesar el certificado. Revisa el archivo o contacta al administrador.") from exc
             return info
 
+        async def queued_issue():
+            if isinstance(store, DriveStorage):
+                # Every browser uses the same corporate OAuth account. Keep
+                # its complete issuance flow serial, including allocation,
+                # conversion and sharing; the other browsers wait safely.
+                async with app.state.drive_emission:
+                    return await issue()
+            return await issue()
+
         try:
-            return await app.state.processing.run(issue)
+            return await app.state.processing.run(queued_issue)
         except ProcessingBusy:
             raise HTTPException(429, "Ya hay tres archivos en preparación. Espera a que termine uno e inténtalo de nuevo.",
                                 headers={"Retry-After": "5"}) from None

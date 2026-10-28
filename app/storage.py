@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 from pathlib import Path
 import re
 import threading
@@ -15,6 +16,7 @@ import httpx
 
 from app.drive_records import decode_record, encode_record, original_file
 from app.portable_qr import KEY, MODE, signed_record, verified_record
+from app.drive_errors import MESSAGES, RATE_LIMITS, operation_name, rejection_reason, retry_after
 
 logger = logging.getLogger(__name__)
 DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -25,8 +27,15 @@ MAX_DOWNLOAD = 64 * 1024 * 1024
 
 
 class StorageError(Exception):
-    def __init__(self, message: str, status: int = 503):
+    def __init__(self, message: str, status: int = 503, *, code: str | None = None,
+                 reason: str | None = None, operation: str | None = None,
+                 upstream_status: int | None = None, retry_seconds: int | None = None):
         self.status = status
+        self.code = code
+        self.reason = reason
+        self.operation = operation
+        self.upstream_status = upstream_status
+        self.retry_seconds = retry_seconds
         super().__init__(message)
 
 
@@ -141,22 +150,76 @@ class DriveStorage:
             return token
 
     def _request(self, method: str, path: str, *, upload: bool = False, **kwargs) -> httpx.Response:
-        headers = {"Authorization": f"Bearer {self._token()}", **kwargs.pop("headers", {})}
-        try:
-            response = self.client.request(method, (DRIVE_UPLOAD if upload else DRIVE_API) + path,
-                                           headers=headers, **kwargs)
-        except httpx.HTTPError:
-            raise StorageError("No se pudo conectar con Google Drive. Inténtalo de nuevo.") from None
+        extra_headers = kwargs.pop("headers", {})
+        operation = operation_name(method, path, upload)
+        rate_retries = 0
+        renewed = False
+        while True:
+            token = self._token()
+            headers = {"Authorization": f"Bearer {token}", **extra_headers}
+            try:
+                response = self.client.request(method, (DRIVE_UPLOAD if upload else DRIVE_API) + path,
+                                               headers=headers, **kwargs)
+            except httpx.HTTPError:
+                # A network failure can happen after Google accepted a write.
+                # Do not automatically repeat an upload with an unknown outcome.
+                raise StorageError("No se pudo conectar con Google Drive. Revisa Drive antes de volver a emitir el certificado.",
+                                   code="DRIVE_NETWORK", operation=operation) from None
+            if response.status_code == 401 and not renewed:
+                with self.token_lock:
+                    # Another request may already have refreshed this token.
+                    if self.token == token:
+                        self.token_deadline = 0
+                renewed = True
+                continue
+            reason = rejection_reason(response) if response.status_code in {403, 429} else None
+            if reason in RATE_LIMITS and rate_retries < 2:
+                instructed = retry_after(response)
+                if instructed is None or instructed <= 5:
+                    delay = max(2**rate_retries + random.uniform(0, .25), instructed or 0)
+                    logger.warning("Drive temporary rejection: operation=%s http=%s reason=%s retry=%s",
+                                   operation, response.status_code, reason, rate_retries + 1)
+                    time.sleep(delay)
+                    rate_retries += 1
+                    continue
+            break
         if response.status_code == 404:
             raise StorageError("El archivo o la carpeta no está disponible en Google Drive.", 404)
-        if response.status_code == 403:
-            raise StorageError("Google Drive rechazó la operación. Revisa los permisos y el espacio de la cuenta.")
+        if response.status_code in {403, 429}:
+            code, message = MESSAGES.get(reason, ("DRIVE_REJECTED",
+                "Google Drive rechazó esta operación sin indicar una causa reconocible. Comunica el código de este aviso al administrador."))
+            logger.warning("Drive rejection: operation=%s http=%s reason=%s code=%s",
+                           operation, response.status_code, reason or "unknown", code)
+            raise StorageError(message, 507 if reason == "storageQuotaExceeded" else 503,
+                               code=code, reason=reason, operation=operation, upstream_status=response.status_code,
+                               retry_seconds=(retry_after(response) or 5) if reason in RATE_LIMITS else None)
         if response.status_code == 401:
-            self.token_deadline = 0
-            raise StorageError("Google Drive requiere renovar su autorización. Inténtalo de nuevo.")
+            with self.token_lock:
+                if self.token == token:
+                    self.token_deadline = 0
+            raise StorageError("Google Drive requiere renovar su autorización. El administrador debe revisar la conexión.",
+                               code="DRIVE_AUTH", operation=operation, upstream_status=401)
         if response.status_code < 200 or response.status_code >= 300:
             raise StorageError("Google Drive no pudo completar la operación. Inténtalo de nuevo.")
         return response
+
+    def check(self) -> dict:
+        """Read-only folder/account check; never expose identities or quota sizes."""
+        self._root()
+        about = self._json(self._request("GET", "/about", params={"fields": "storageQuota(limit,usage)"}))
+        quota = about.get("storageQuota", {})
+        storage = "not_reported"
+        try:
+            limit, used = int(quota["limit"]), int(quota["usage"])
+        except (KeyError, ValueError, TypeError):
+            pass
+        else:
+            if 0 <= limit <= used:
+                raise StorageError(MESSAGES["storageQuotaExceeded"][1], 507, code="DRIVE_STORAGE_FULL",
+                                   reason="storageQuotaExceeded", operation="check_storage")
+            if limit >= 0 and used >= 0:
+                storage = "available"
+        return {"backend": "drive", "status": "ok", "folderWritable": True, "storage": storage}
 
     def _json(self, response: httpx.Response) -> dict:
         try:
