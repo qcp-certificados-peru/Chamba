@@ -27,14 +27,15 @@ def check_permissions(doc):
     assert not doc.needs_pass
     assert "256-bit AES" in doc.metadata["encryption"]
     for permission in (pymupdf.PDF_PERM_MODIFY, pymupdf.PDF_PERM_ANNOTATE,
-                       pymupdf.PDF_PERM_FORM, pymupdf.PDF_PERM_ASSEMBLE):
+                       pymupdf.PDF_PERM_FORM, pymupdf.PDF_PERM_ASSEMBLE,
+                       pymupdf.PDF_PERM_COPY):
         assert not doc.permissions & permission
     for permission in (pymupdf.PDF_PERM_PRINT, pymupdf.PDF_PERM_PRINT_HQ,
-                       pymupdf.PDF_PERM_COPY, pymupdf.PDF_PERM_ACCESSIBILITY):
+                       pymupdf.PDF_PERM_ACCESSIBILITY):
         assert doc.permissions & permission
     assert doc.authenticate("") == 2  # Viewing requires no password.
     assert doc.authenticate("wrong-password") == 0
-    assert doc.authenticate(PASSWORD) == 4  # Only the owner password unlocks editing.
+    assert doc.authenticate(PASSWORD) == 4  # Owner can change the editing/copying restrictions.
 
 
 def test_protection_preserves_all_pages_pixels_text_links_and_qr(monkeypatch):
