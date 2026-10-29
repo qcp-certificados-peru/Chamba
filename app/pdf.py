@@ -33,7 +33,7 @@ class CertificateError(ValueError):
 
 
 def pdf_save_options() -> dict:
-    """Restrict editing with a server-side owner password; viewing stays public."""
+    """Restrict editing and copying; viewing, printing and accessibility stay public."""
     password = os.environ.get("CERTIFICATE_PDF_OWNER_PASSWORD", "")
     if not password:
         return {"encryption": pymupdf.PDF_ENCRYPT_NONE}
@@ -42,7 +42,7 @@ def pdf_save_options() -> dict:
     return {"encryption": pymupdf.PDF_ENCRYPT_AES_256,
             "owner_pw": password, "user_pw": "",
             "permissions": (pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_PRINT_HQ
-                            | pymupdf.PDF_PERM_COPY | pymupdf.PDF_PERM_ACCESSIBILITY)}
+                            | pymupdf.PDF_PERM_ACCESSIBILITY)}
 
 
 def normalized_code(value: str) -> str:
