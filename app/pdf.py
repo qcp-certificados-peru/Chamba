@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from io import BytesIO
+import os
 import re
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -29,6 +30,19 @@ MAX_PAGES = 100
 
 class CertificateError(ValueError):
     pass
+
+
+def pdf_save_options() -> dict:
+    """Restrict editing with a server-side owner password; viewing stays public."""
+    password = os.environ.get("CERTIFICATE_PDF_OWNER_PASSWORD", "")
+    if not password:
+        return {"encryption": pymupdf.PDF_ENCRYPT_NONE}
+    if len(password.encode("utf-8")) > 40:
+        raise CertificateError("CERTIFICATE_PDF_OWNER_PASSWORD admite como máximo 40 bytes UTF-8.")
+    return {"encryption": pymupdf.PDF_ENCRYPT_AES_256,
+            "owner_pw": password, "user_pw": "",
+            "permissions": (pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_PRINT_HQ
+                            | pymupdf.PDF_PERM_COPY | pymupdf.PDF_PERM_ACCESSIBILITY)}
 
 
 def normalized_code(value: str) -> str:
@@ -155,6 +169,7 @@ def prepare_pdf(data: bytes, requested_code: str, verification_url: str,
                 signature: bytes | None = None, template: bool = False,
                 background_digests: tuple[bytes, ...] = (), automatic_qr: bool = False,
                 letterhead=None) -> PreparedPDF:
+    save_options = pdf_save_options()
     if letterhead is not None:
         requested_code,signature,template,automatic_qr='',None,True,False
     requested_code = normalized_code(requested_code)
@@ -251,7 +266,7 @@ def prepare_pdf(data: bytes, requested_code: str, verification_url: str,
             from app.pdf_images import compact_backgrounds
             compact_backgrounds(doc,background_digests)
         result = doc.tobytes(garbage=4, deflate=True, use_objstms=1,
-                             encryption=pymupdf.PDF_ENCRYPT_NONE)
+                             **save_options)
         background_pages=[]
         if template:
             with pymupdf.open(stream=result,filetype='pdf') as final:
