@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.pdf import CertificateError, normalized_code, CODE, CODE_PATTERN, MAX_CODE_LENGTH, CODE_ERROR
 from app.documents import prepare_document
+from app.pdf_reports import is_technical_report
 from app.excel import inspect_excel
 from app.storage import DriveStorage, LocalStorage, StorageError, storage_from_environment
 from app.backgrounds import background_choices, require_background_type
@@ -278,8 +279,6 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
                                  excelToken: str = Form(""), pruebaCopia: bool = Form(False),
                                  pruebaMovimiento: bool = Form(False)):
         started = perf_counter()
-        if not store.ready:
-            raise StorageError("Falta completar la conexión con Google Drive. Contacta al administrador.")
         if pruebaCopia and store.qr_mode != "portable-v1":
             raise HTTPException(422, "Los QR nuevos abren directamente Drive. Usa Mover o Cortar y pegar; la prueba actual es pruebaMovimiento.")
         if sum((excel is not None, pdf is not None, bool(excelToken))) != 1:
@@ -332,6 +331,8 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
         inspected = perf_counter()
 
         async def issue():
+            if not store.ready:
+                raise StorageError("Falta completar la conexión con Google Drive. Contacta al administrador.")
             try:
                 publication = await asyncio.to_thread(store.allocate, certificate_id, origin)
                 verification_url = publication.verification_url
@@ -379,6 +380,22 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
             return info
 
         async def queued_issue():
+            if source_type == "pdf":
+                loop = asyncio.get_running_loop()
+                report = await loop.run_in_executor(app.state.executor, is_technical_report, data)
+                if report:
+                    try:
+                        require_background_type(tipoCertificado)
+                        result = await loop.run_in_executor(
+                            app.state.executor, prepare_document, data, "pdf", "", "", None,
+                            tipoCertificado, "", "")
+                    except CertificateError as exc:
+                        raise HTTPException(422, str(exc)) from exc
+                    # Direct download: no publication ID, QR, storage or Drive calls.
+                    return Response(result.data, media_type="application/pdf", headers={
+                        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+                        "X-Processing-Mode": "background-only",
+                    })
             if isinstance(store, DriveStorage):
                 # Every browser uses the same corporate OAuth account. Keep
                 # its complete issuance flow serial, including allocation,

@@ -8,6 +8,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      CERTIFICATE_STORAGE_BACKEND: local
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,4 +21,5 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-calc fonts-liberation fonts-dejavu-core fonts-crosextra-carlito
       - run: uv sync --locked
+      - run: node --check app/static/app.js
       - run: uv run --no-sync python -m pytest -q

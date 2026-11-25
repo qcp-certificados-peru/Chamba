@@ -168,8 +168,7 @@ def _stamp_position(page: pymupdf.Page, with_signature: bool) -> pymupdf.Rect | 
 def prepare_pdf(data: bytes, requested_code: str, verification_url: str,
                 signature: bytes | None = None, template: bool = False,
                 background_digests: tuple[bytes, ...] = (), automatic_qr: bool = False,
-                letterhead=None) -> PreparedPDF:
-    save_options = pdf_save_options()
+                letterhead=None, background_only: bool = False) -> PreparedPDF:
     if letterhead is not None:
         requested_code,signature,template,automatic_qr='',None,True,False
     requested_code = normalized_code(requested_code)
@@ -188,10 +187,25 @@ def prepare_pdf(data: bytes, requested_code: str, verification_url: str,
         for page in doc:
             if any(widget.field_type == pymupdf.PDF_WIDGET_TYPE_SIGNATURE for widget in (page.widgets() or [])):
                 raise CertificateError("Este PDF contiene un campo de firma digital. No se modificará para preservar su firma.")
+        if background_only and letterhead is None:
+            raise CertificateError("Selecciona Acreditado o No acreditado para el fondo del informe.")
         if letterhead is not None:
             from app.backgrounds import apply_letterhead
             apply_letterhead(doc,letterhead,preserve_page_size=True,verify=False)
             background_digests=(letterhead.digest,)
+        if background_only:
+            from app.pdf_images import compact_backgrounds
+            from app.backgrounds import verify_letterhead
+            compact_backgrounds(doc, background_digests)
+            # Reports only change the background, retaining the source permissions.
+            result = doc.tobytes(garbage=4, deflate=True, use_objstms=1,
+                                 encryption=pymupdf.PDF_ENCRYPT_KEEP)
+            with pymupdf.open(stream=result, filetype="pdf") as final:
+                pages = verify_letterhead(final, letterhead, preserve_page_size=True)
+            return PreparedPDF(result, [], None, 0, [], [], False,
+                               certificate_type=letterhead.kind, background_pages=pages,
+                               format_preserved=True)
+        save_options = pdf_save_options()
         original_text = "\n".join(page.get_text() for page in doc)
         raw_codes = list(dict.fromkeys(code.upper() for code in CODE.findall(original_text)))
         codes = list(dict.fromkeys(re.sub(r"\s+", "", code) for code in raw_codes))
