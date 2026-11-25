@@ -82,7 +82,7 @@ def test_background_only_preserves_pages_words_tables_images_and_existing_links(
 
 
 @pytest.mark.parametrize("kind", ["acreditado", "no_acreditado"])
-def test_report_response_never_contacts_or_writes_drive(synthetic_backgrounds, kind):
+def test_report_response_never_contacts_or_writes_drive(kind):
     drive = FakeDrive()
     source = report_pdf()
     with TestClient(create_app(certificate_storage=drive.storage())) as client:
