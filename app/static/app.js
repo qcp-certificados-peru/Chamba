@@ -5,6 +5,7 @@ let busy = false;
 let ready = false;
 const codes = new Map();
 const certificateTypes = new Map();
+const pdfModes = new Map();
 const layouts = new Map();
 const formatFooters = new Map();
 const batchLinks = new Map();
@@ -57,7 +58,7 @@ function renderFiles() {
     remove.textContent = "×";
     remove.disabled = busy;
     remove.setAttribute("aria-label", `Quitar ${file.name}`);
-    remove.addEventListener("click", () => { codes.delete(file); certificateTypes.delete(file); layouts.delete(file); formatFooters.delete(file); files.splice(index, 1); renderFiles(); });
+    remove.addEventListener("click", () => { codes.delete(file); pdfModes.delete(file); certificateTypes.delete(file); layouts.delete(file); formatFooters.delete(file); files.splice(index, 1); renderFiles(); });
     top.append(name, remove);
     row.append(top);
     if (/\.xls[xm]$/i.test(file.name)) {
@@ -77,6 +78,29 @@ function renderFiles() {
         retry.addEventListener("click", () => inspectFile(file));
         row.append(retry);
       }
+    }
+    if (isPdf) {
+      const modeLabel = document.createElement("label");
+      modeLabel.className = "code-label type-label";
+      modeLabel.textContent = "¿Qué quieres hacer con este PDF?";
+      const mode = document.createElement("select");
+      mode.id = `pdf-mode-${index}`;
+      mode.className = "code-input pdf-mode-select";
+      mode.disabled = busy;
+      for (const [value, text] of [
+        ["auto", "Automático · reconocer informe o certificado"],
+        ["background", "Solo fondo · sin QR ni guardado en Drive"],
+        ["certificate", "Certificado · fondo, QR y guardado en Drive"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = text;
+        mode.append(option);
+      }
+      mode.value = pdfModes.get(file) || "auto";
+      mode.addEventListener("change", () => { pdfModes.set(file, mode.value); renderFiles(); });
+      modeLabel.htmlFor = mode.id;
+      row.append(modeLabel, mode);
     }
     if (needsBackground(file)) {
       const typeLabel = document.createElement("label");
@@ -107,7 +131,12 @@ function renderFiles() {
       row.append(typeLabel, select);
       const hint = document.createElement("small");
       hint.className = "background-hint";
-      hint.textContent = isPdf ? "Informes de mantenimiento o calificación: solo fondo y descarga directa, sin guardarlos en Drive. Certificados: fondo y QR junto a «Escanee este QR»." :
+      const mode = pdfModes.get(file) || "auto";
+      hint.textContent = isPdf ? (mode === "background"
+        ? "Solo añadiremos el fondo. Descarga directa, sin QR ni guardado en Drive; el título del PDF puede ser cualquiera."
+        : mode === "certificate"
+          ? "Conservamos el proceso del certificado: fondo y QR junto a «Escanee este QR», con guardado en Drive."
+          : "Reconocemos informes de mantenimiento, calibración o calificación. Si tu informe no se reconoce, elige Solo fondo; no necesita QR.") :
         "Conservaremos los formatos existentes. Este fondo solo se añadirá a las hojas que no tengan uno.";
       row.append(hint);
     }
@@ -384,6 +413,7 @@ $("certificate-form").addEventListener("submit", async (event) => {
       if (uploadToken) form.append("excelToken", uploadToken);
       else form.append(/\.xls[xm]$/i.test(file.name) ? "excel" : "pdf", file);
       if (isExcel) form.append("codigoCorrecto", (codes.get(file) || "").trim());
+      else form.append("modoPdf", pdfModes.get(file) || "auto");
       if (needsBackground(file)) form.append("tipoCertificado", certificateTypes.get(file));
       const footer = formatFooters.get(file);
       if (footer?.code.trim() && footer?.version.trim()) {
@@ -415,6 +445,7 @@ $("certificate-form").addEventListener("submit", async (event) => {
           batchLinks.set(batchPositions.get(file), { filename: result.filename, driveUrl: result.driveUrl });
         }
         codes.delete(file);
+        pdfModes.delete(file);
         certificateTypes.delete(file);
         layouts.delete(file);
         formatFooters.delete(file);

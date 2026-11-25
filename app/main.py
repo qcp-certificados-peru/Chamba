@@ -20,7 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.pdf import CertificateError, normalized_code, CODE, CODE_PATTERN, MAX_CODE_LENGTH, CODE_ERROR
 from app.documents import prepare_document
-from app.pdf_reports import is_technical_report
+from app.pdf_reports import is_technical_report, PDF_MODES, PDF_MODE_ERROR
 from app.excel import inspect_excel
 from app.storage import DriveStorage, LocalStorage, StorageError, storage_from_environment
 from app.backgrounds import background_choices, require_background_type
@@ -277,13 +277,15 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
                                  firma: UploadFile | None = File(None), tipoCertificado: str = Form(""),
                                  codigoFormato: str = Form(''), versionFormato: str = Form(''),
                                  excelToken: str = Form(""), pruebaCopia: bool = Form(False),
-                                 pruebaMovimiento: bool = Form(False)):
+                                 pruebaMovimiento: bool = Form(False), modoPdf: str = Form("auto")):
         started = perf_counter()
         if pruebaCopia and store.qr_mode != "portable-v1":
             raise HTTPException(422, "Los QR nuevos abren directamente Drive. Usa Mover o Cortar y pegar; la prueba actual es pruebaMovimiento.")
         if sum((excel is not None, pdf is not None, bool(excelToken))) != 1:
             raise HTTPException(422, "Sube un Excel .xlsx, .xlsm o un PDF por solicitud.")
         source_type = "xlsx" if excel or excelToken else "pdf"
+        if modoPdf not in PDF_MODES or (source_type != "pdf" and modoPdf != "auto"):
+            raise HTTPException(422, PDF_MODE_ERROR)
         pdf_only=source_type=='pdf' and bool(tipoCertificado)
         if pdf_only:
             codigoCorrecto=''
@@ -339,7 +341,7 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
                 allocated = perf_counter()
                 result = await asyncio.get_running_loop().run_in_executor(
                     app.state.executor, prepare_document, data, source_type, codigoCorrecto, verification_url, signature,
-                    tipoCertificado, codigoFormato, versionFormato)
+                    tipoCertificado, codigoFormato, versionFormato, modoPdf)
                 processed = perf_counter()
                 named_code = CODE.search(source_name or "")
                 if named_code and result.final_code and named_code[0].upper() != result.final_code:
@@ -382,13 +384,15 @@ def create_app(storage_dir: Path | None = None, public_url: str | None = None,
         async def queued_issue():
             if source_type == "pdf":
                 loop = asyncio.get_running_loop()
-                report = await loop.run_in_executor(app.state.executor, is_technical_report, data)
+                report = modoPdf == "background"
+                if modoPdf == "auto":
+                    report = await loop.run_in_executor(app.state.executor, is_technical_report, data)
                 if report:
                     try:
                         require_background_type(tipoCertificado)
                         result = await loop.run_in_executor(
                             app.state.executor, prepare_document, data, "pdf", "", "", None,
-                            tipoCertificado, "", "")
+                            tipoCertificado, "", "", "background")
                     except CertificateError as exc:
                         raise HTTPException(422, str(exc)) from exc
                     # Direct download: no publication ID, QR, storage or Drive calls.

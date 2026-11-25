@@ -4,13 +4,16 @@ from app.excel import convert_excel, inspect_excel
 from app.pdf import CertificateError, PreparedPDF, prepare_pdf, signature_png, normalized_code
 from app.backgrounds import load_letterhead, verify_letterhead
 from app.excel_footers import verify_format_footers
-from app.pdf_reports import is_technical_report
+from app.pdf_reports import is_technical_report, PDF_MODES, PDF_MODE_ERROR
 import pymupdf
 
 
 def prepare_document(data: bytes, source_type: str, requested_code: str,
                      verification_url: str, signature: bytes | None = None,
-                     certificate_type: str = "", format_code: str = '', format_version: str = '') -> PreparedPDF:
+                     certificate_type: str = "", format_code: str = '', format_version: str = '',
+                     pdf_mode: str = "auto") -> PreparedPDF:
+    if pdf_mode not in PDF_MODES or (source_type == "xlsx" and pdf_mode != "auto"):
+        raise CertificateError(PDF_MODE_ERROR)
     requested_code = normalized_code(requested_code) if source_type=='xlsx' or not certificate_type else ''
     if source_type == "xlsx":
         # Validate the optional replacement before starting the Office conversion.
@@ -40,6 +43,7 @@ def prepare_document(data: bytes, source_type: str, requested_code: str,
         return result
     result = prepare_pdf(data, requested_code, verification_url, signature,
                          letterhead=load_letterhead(certificate_type) if certificate_type else None,
-                         background_only=is_technical_report(data))
+                         background_only=(pdf_mode == "background" or
+                                          (pdf_mode == "auto" and is_technical_report(data))))
     pymupdf.TOOLS.store_shrink(100)
     return result

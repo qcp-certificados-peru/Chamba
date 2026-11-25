@@ -26,6 +26,10 @@ def report_pdf(title="INFORME TÉCNICO DE MANTENIMIENTO Y CALIFICACIÓN", **opti
     "Informe tecnico de mantenimiento preventivo",
     "INFORME TÉCNICO DE CALIFICACIÓN",
     "INFORME DE CALIFICACION",
+    "INFORME TECNICO MANTENIMIENTO Y CALIBRACION",
+    "INFORME TÉCNICO - MANTENIMIENTO Y CALIBRACIÓN",
+    "Informe técnico: calibración",
+    "INFORME DE CALIBRACION",
     "INFORME\nTÉCNICO DE\nCALIFICACIÓN",
 ])
 def test_recognizes_report_headings(title):
@@ -40,7 +44,7 @@ def test_mentions_do_not_turn_certificates_into_reports(placement):
         text = "INFORME TÉCNICO DE MANTENIMIENTO"
         if placement == "paragraph":
             text = "Referencia al informe técnico de mantenimiento anterior."
-        if placement == "certificate_heading":
+        if placement in {"certificate_heading", "bottom"}:
             page.insert_text((80, 100), "CERTIFICADO DE CALIBRACION")
         page.insert_text(point, text, fontsize=9)
         assert not is_technical_report(doc.tobytes())
@@ -162,3 +166,72 @@ def test_invalid_and_password_locked_pdf_do_not_crash_detection():
         encrypted = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256,
                                owner_pw="owner-test", user_pw="locked-test")
     assert not is_technical_report(encrypted)
+
+
+def test_report_heading_below_the_middle_of_page_is_detected():
+    with pymupdf.open(stream=report_pdf("RESULTADOS"), filetype="pdf") as doc:
+        doc[0].insert_text((80, 580), "INFORME TECNICO MANTENIMIENTO", fontsize=11)
+        assert is_technical_report(doc.tobytes())
+
+
+@pytest.mark.parametrize("kind", ["acreditado", "no_acreditado"])
+@pytest.mark.parametrize("title", ["DOCUMENTO SIN TITULO", "INFORME TECNICO DE MATNEMIENTO",
+                                  "INFORME TECNICO N. 001"])
+def test_explicit_background_mode_needs_no_title_or_qr_and_never_uses_drive(kind, title):
+    source = report_pdf(title)
+    drive = FakeDrive()
+    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+        response = client.post("/api/certificates", files={"pdf": ("documento.pdf", source)},
+                               data={"tipoCertificado": kind, "modoPdf": "background"})
+    assert response.status_code == 200, response.text
+    assert response.headers["x-processing-mode"] == "background-only"
+    assert drive.token_requests == 0 and drive.writes == [] and set(drive.files) == {ROOT}
+    with pymupdf.open(stream=source, filetype="pdf") as before, \
+            pymupdf.open(stream=response.content, filetype="pdf") as after:
+        assert len(before) == len(after) == 2
+        assert verify_letterhead(after, load_letterhead(kind), preserve_page_size=True) == [1, 2]
+        for old, new in zip(before, after, strict=True):
+            assert old.get_text("words") == new.get_text("words")
+            assert old.rect == new.rect
+            assert not new.get_links() or all(link.get("uri") == "https://example.com/keep-link"
+                                             for link in new.get_links())
+
+
+def test_explicit_certificate_mode_keeps_qr_and_drive_for_report_like_titles():
+    with pymupdf.open(stream=certificate_pdf(), filetype="pdf") as doc:
+        doc[0].insert_text((80, 105), "INFORME TECNICO MANTENIMIENTO", fontsize=9)
+        source = doc.tobytes()
+    assert is_technical_report(source)
+    drive = FakeDrive()
+    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+        response = client.post("/api/certificates", files={"pdf": ("certificate.pdf", source)},
+                               data={"tipoCertificado": "acreditado", "modoPdf": "certificate"})
+        assert response.status_code == 201, response.text
+        info = response.json()
+        pdf = client.get(info["downloadUrl"]).content
+    assert info["stampPages"] == [1] and info["driveUrl"]
+    assert set(drive.files) == {ROOT, info["driveFileId"]}
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        assert any(link.get("uri") == info["verificationUrl"] for link in doc[0].get_links())
+
+
+@pytest.mark.parametrize("kind", ["", "unknown"])
+def test_manual_background_validates_background_without_drive(kind):
+    drive = FakeDrive()
+    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+        response = client.post("/api/certificates", files={"pdf": ("document.pdf", report_pdf("OTHER"))},
+                               data={"tipoCertificado": kind, "modoPdf": "background"})
+    assert response.status_code == 422
+    assert drive.token_requests == 0 and drive.writes == []
+
+
+@pytest.mark.parametrize("source_type,mode", [("pdf", "invalid"), ("excel", "background"),
+                                            ("excel", "certificate")])
+def test_invalid_or_excel_pdf_modes_are_rejected_before_drive(source_type, mode):
+    drive = FakeDrive()
+    name = "document.pdf" if source_type == "pdf" else "document.xlsx"
+    with TestClient(create_app(certificate_storage=drive.storage())) as client:
+        response = client.post("/api/certificates", files={source_type: (name, b"invalid")},
+                               data={"modoPdf": mode})
+    assert response.status_code == 422
+    assert drive.token_requests == 0 and drive.writes == []

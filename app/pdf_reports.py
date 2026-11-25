@@ -6,12 +6,18 @@ import unicodedata
 import pymupdf
 
 
-_REPORT = re.compile(r"(?im)^\s*informe\s+(?:tecnico\s+)?de\s+(?:mantenimiento|calificacion)\b")
+PDF_MODES = {"auto", "background", "certificate"}
+PDF_MODE_ERROR = "Elige un modo de PDF válido: Automático, Solo fondo o Certificado."
+
+_REPORT = re.compile(
+    r"(?im)^[ \t]*informe[\s:–—-]+(?:tecnico[\s:–—-]+)?"
+    r"(?:de\s+)?(?:mantenimiento|calibracion|calificacion)\b"
+)
 _CERTIFICATE = re.compile(r"(?im)^\s*certificado\s+(?:de\s+)?calibracion\b")
 
 
 def is_technical_report(data: bytes) -> bool:
-    """Only a heading in the upper half of the first page selects report mode."""
+    """Recognize varied report headings anywhere on the first page."""
     if not data.startswith(b"%PDF-"):
         return False
     try:
@@ -19,8 +25,7 @@ def is_technical_report(data: bytes) -> bool:
             if doc.needs_pass or not doc.page_count:
                 return False
             page = doc[0]
-            area = pymupdf.Rect(0, 0, page.rect.width, page.rect.height / 2)
-            text = page.get_text("text", clip=area, sort=True)
+            text = page.get_text("text", sort=True)
             text = "".join(char for char in unicodedata.normalize("NFKD", text)
                            if not unicodedata.combining(char))
             report = _REPORT.search(text)
