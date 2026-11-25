@@ -4,6 +4,7 @@ from app.excel import convert_excel, inspect_excel
 from app.pdf import CertificateError, PreparedPDF, prepare_pdf, signature_png, normalized_code
 from app.backgrounds import load_letterhead, verify_letterhead
 from app.excel_footers import verify_format_footers
+from app.pdf_reports import is_technical_report
 import pymupdf
 
 
@@ -38,6 +39,7 @@ def prepare_document(data: bytes, source_type: str, requested_code: str,
             raise CertificateError("No se pudo verificar el código del certificado en la hoja impresa. Revisa ese dato esencial antes de emitirlo.")
         return result
     result = prepare_pdf(data, requested_code, verification_url, signature,
-                         letterhead=load_letterhead(certificate_type) if certificate_type else None)
+                         letterhead=load_letterhead(certificate_type) if certificate_type else None,
+                         background_only=is_technical_report(data))
     pymupdf.TOOLS.store_shrink(100)
     return result

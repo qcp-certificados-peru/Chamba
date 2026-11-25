@@ -11,6 +11,7 @@ const batchLinks = new Map();
 let batchPositions = new WeakMap();
 let nextBatchPosition = 0;
 let inspectionQueue = Promise.resolve();
+let reportDownloads = [];
 let backgrounds = [];
 let certificateCodePattern = "";
 let maxCodeLength = 40;
@@ -88,7 +89,7 @@ function renderFiles() {
       select.disabled = busy;
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = "Selecciona el tipo de certificado";
+      placeholder.textContent = "Selecciona el fondo";
       select.append(placeholder);
       for (const background of backgrounds) {
         const option = document.createElement("option");
@@ -106,7 +107,7 @@ function renderFiles() {
       row.append(typeLabel, select);
       const hint = document.createElement("small");
       hint.className = "background-hint";
-      hint.textContent = isPdf ? "Añadiremos el fondo a sus páginas y alinearemos el QR junto a «Escanee este QR». Sus textos, tablas y firma se conservan." :
+      hint.textContent = isPdf ? "Informes de mantenimiento o calificación: solo fondo y descarga directa, sin guardarlos en Drive. Certificados: fondo y QR junto a «Escanee este QR»." :
         "Conservaremos los formatos existentes. Este fondo solo se añadirá a las hojas que no tengan uno.";
       row.append(hint);
     }
@@ -238,11 +239,12 @@ $("download-links")?.addEventListener("click", () => {
 });
 
 function addResult(file, result, error) {
+  const isReport = result?.processingMode === "background-only";
   const card = document.createElement("article");
   card.className = `result-card${error ? " failed" : ""}`;
   const label = document.createElement("div");
   label.className = `result-label${error ? " failed" : ""}`;
-  label.textContent = error ? "NO SE PUDO PROCESAR" : "CERTIFICADO PREPARADO";
+  label.textContent = error ? "NO SE PUDO PROCESAR" : isReport ? "INFORME PREPARADO" : "CERTIFICADO PREPARADO";
   const title = document.createElement("strong");
   title.textContent = file.name;
   card.append(label, title);
@@ -252,7 +254,7 @@ function addResult(file, result, error) {
     card.append(detail);
   } else {
     const detail = document.createElement("p");
-    detail.textContent = result.sourceType === "pdf" && result.backgroundVerified ? `${result.finalCode || "PDF"} · QR y fondo` :
+    detail.textContent = isReport ? "Solo fondo · descarga directa · sin guardarse en Drive" : result.sourceType === "pdf" && result.backgroundVerified ? `${result.finalCode || "PDF"} · QR y fondo` :
       `${result.finalCode || "Sin código único detectado"} · ${result.signatureIncluded ? "Con imagen de firma" : "Sin firma añadida"}`;
     card.append(detail);
     if (result.formatPreserved) {
@@ -285,7 +287,14 @@ function addResult(file, result, error) {
     actions.className = "actions";
     const download = document.createElement("a");
     download.href = result.downloadUrl;
+    if (isReport) download.download = result.filename;
     download.textContent = "Descargar PDF ↓";
+    if (isReport) {
+      actions.append(download);
+      card.append(actions);
+      $("result-list").append(card);
+      return;
+    }
     const verify = document.createElement("a");
     // Relative URL keeps local development usable if localhost and 127.0.0.1 differ.
     verify.href = result.driveUrl || `/certificados/${result.id}`;
@@ -344,6 +353,8 @@ $("certificate-form").addEventListener("submit", async (event) => {
     $("result-list").querySelectorAll(".failed").forEach((card) => card.remove());
   } else {
     batchLinks.clear();
+    for (const url of reportDownloads) URL.revokeObjectURL(url);
+    reportDownloads = [];
     batchPositions = new WeakMap();
     nextBatchPosition = 0;
     $("result-list").replaceChildren();
@@ -389,7 +400,15 @@ $("certificate-form").addEventListener("submit", async (event) => {
           form.append("excel", file);
           response = await fetch("/api/certificates", { method: "POST", body: form });
         }
-        const result = await response.json();
+        let result;
+        if (response.ok && response.headers.get("X-Processing-Mode") === "background-only") {
+          const url = URL.createObjectURL(await response.blob());
+          reportDownloads.push(url);
+          result = { sourceType: "pdf", processingMode: "background-only", filename: file.name,
+            downloadUrl: url, formatPreserved: true, warnings: [] };
+        } else {
+          result = await response.json();
+        }
         if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "La carga no es válida.");
         addResult(file, result, null);
         if (result.filename && window.QCPLinksExcel?.isDriveLink(result.driveUrl)) {
@@ -418,7 +437,7 @@ $("certificate-form").addEventListener("submit", async (event) => {
     arrow.textContent = "→";
     arrow.setAttribute("aria-hidden", "true");
     $("submit").replaceChildren(document.createTextNode(failed.length ? "Reintentar archivos pendientes" : "Preparar certificados"), arrow);
-    $("progress").textContent = `${completed} de ${batch.length} certificados preparados.${failed.length ? " Los archivos pendientes siguen seleccionados." : " Ya puedes descargarlos."}`;
+    $("progress").textContent = `${completed} de ${batch.length} documentos preparados.${failed.length ? " Los archivos pendientes siguen seleccionados." : " Ya puedes descargarlos."}`;
     renderFiles();
   }
 });
